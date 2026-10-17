@@ -1,0 +1,14 @@
+# Dependencies and build output
+node_modules/
+dist/
+
+# Secrets and local client configuration (may contain API tokens)
+.env
+.env.*
+!.env.example
+.mcp.json
+
+# Logs and OS files
+*.log
+.DS_Store
+Thumbs.db
