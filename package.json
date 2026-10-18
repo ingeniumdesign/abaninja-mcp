@@ -34,8 +34,9 @@
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
     "catalog": "node scripts/generate-catalog.mjs",
-    "smoke": "node scripts/smoke-test.mjs",
-    "test": "npm run build && node --test \"test/*.test.mjs\""
+    "test": "npm run build && node --test \"test/*.test.mjs\"",
+    "live": "node scripts/live-test.mjs",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

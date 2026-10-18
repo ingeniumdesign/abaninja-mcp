@@ -8,7 +8,8 @@ import type { AbaNinjaClient } from "./abaninja.js";
 // - abaninja_describe_endpoint  parameters and fields of one endpoint
 // - abaninja_request            call any endpoint within the configured mode
 // - abaninja_search_addresses   search companies and persons (the API has no search)
-// - abaninja_open_invoices      open invoices, optionally per customer (the API has no customer filter)
+// - abaninja_find_documents     find invoices, quotes and other documents by number, text or customer
+// - abaninja_open_invoices      open invoices with totals per currency (the API has no customer filter)
 
 interface Endpoint {
   area: string;
@@ -17,15 +18,7 @@ interface Endpoint {
   summary: string;
   tag?: string;
   params?: { name: string; in: string; type: string; required?: boolean; description?: string }[];
-  body?: {
-    name: string;
-    type: string;
-    required?: boolean;
-    requiredIf?: string;
-    requiredUnless?: string;
-    description?: string;
-    note?: string;
-  }[];
+  body?: { name: string; type: string; required?: boolean; requiredIf?: string; requiredUnless?: string; description?: string }[];
   note?: string;
 }
 
@@ -33,27 +26,24 @@ type Row = Record<string, any>;
 
 const MAX_RESPONSE_CHARS = 50_000;
 const PAGE_SIZE = 400;
+const MAX_PAGES = 100;
 const CACHE_MS = 60_000;
+const DOCUMENT_TYPES = [
+  "invoices", "quotes", "credit-notes", "delivery-notes", "contract-notes", "receipts", "supplier-credit-notes",
+] as const;
 
-let catalog: Endpoint[] | undefined;
-function loadCatalog(): Endpoint[] {
-  catalog ??= JSON.parse(
-    readFileSync(new URL("../catalog/endpoints.json", import.meta.url), "utf8"),
-  ) as Endpoint[];
-  return catalog;
-}
+const catalog: Endpoint[] = JSON.parse(readFileSync(new URL("../catalog/endpoints.json", import.meta.url), "utf8"));
+const AREAS = [...new Set(catalog.map((e) => e.area))].sort() as [string, ...string[]];
 
-// Drops null, empty strings, empty arrays and empty objects to keep answers short.
+// Drops null and empty strings to keep answers short, keeps empty lists (an empty result is information)
+// and hides secrets such as webhook signature keys.
 function prune(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    const items = value.map(prune).filter((item) => item !== undefined);
-    return items.length ? items : undefined;
-  }
+  if (Array.isArray(value)) return value.map(prune).filter((item) => item !== undefined);
   if (value && typeof value === "object") {
     const entries = Object.entries(value)
-      .map(([key, item]) => [key, prune(item)] as const)
+      .map(([key, item]) => [key, /^(signatureKey|secret|password)$/i.test(key) && item ? "[hidden]" : prune(item)] as const)
       .filter(([, item]) => item !== undefined);
-    return entries.length ? Object.fromEntries(entries) : undefined;
+    return Object.fromEntries(entries);
   }
   return value === null || value === "" ? undefined : value;
 }
@@ -84,14 +74,14 @@ function withList(value: any, items: unknown[], entriesOnPage: number): unknown 
 
 function reply(data: unknown) {
   let value: any = prune(data) ?? null;
-  let text = JSON.stringify(value, null, 1);
+  let text = JSON.stringify(value);
   if (text.length > MAX_RESPONSE_CHARS && isPage(value)) {
     // A page of this server drops whole items from the end, so count and nextOffset stay exact.
     while (text.length > MAX_RESPONSE_CHARS && value.items.length > 1) {
       const keep = Math.max(1, Math.floor((value.items.length * MAX_RESPONSE_CHARS) / text.length) - 1);
       const items = value.items.slice(0, keep);
       value = { ...value, count: items.length, nextOffset: value.offset + items.length, items, shortened: true };
-      text = JSON.stringify(value, null, 1);
+      text = JSON.stringify(value);
     }
   } else if (text.length > MAX_RESPONSE_CHARS && listOf(value)) {
     // A raw API list drops whole entries from the end and says how many are shown.
@@ -99,7 +89,7 @@ function reply(data: unknown) {
     let keep = all.length;
     while (text.length > MAX_RESPONSE_CHARS && keep > 1) {
       keep = Math.max(1, Math.floor((keep * MAX_RESPONSE_CHARS) / text.length) - 1);
-      text = JSON.stringify(withList(value, all.slice(0, keep), all.length), null, 1);
+      text = JSON.stringify(withList(value, all.slice(0, keep), all.length));
     }
   }
   if (text.length > MAX_RESPONSE_CHARS) {
@@ -110,58 +100,60 @@ function reply(data: unknown) {
   return { content: [{ type: "text" as const, text }] };
 }
 
-// Today's date in Switzerland as YYYY-MM-DD: AbaNinja due dates are Swiss calendar dates.
-function swissToday(): string {
-  return new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Zurich" });
-}
-
 function fail(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return { isError: true, content: [{ type: "text" as const, text: message }] };
 }
 
-// Fetches every page of a list endpoint. Stops when a page has fewer than PAGE_SIZE entries.
+// Today's date in Switzerland as YYYY-MM-DD: AbaNinja due dates are Swiss calendar dates.
+function swissToday(): string {
+  return new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Zurich" });
+}
+
+// Fetches every page of a list endpoint until a page has fewer than PAGE_SIZE entries.
+// complete is false when MAX_PAGES were not enough.
 async function fetchAll(
   client: AbaNinjaClient,
   path: string,
   query: Record<string, string | number | boolean>,
-  pick: (body: any) => Row[],
-): Promise<Row[]> {
+  pick: (body: any) => unknown,
+): Promise<{ rows: Row[]; complete: boolean }> {
   const rows: Row[] = [];
-  for (let page = 1; page <= 100; page++) {
-    const body = await client.request("GET", path, { query: { ...query, limit: PAGE_SIZE, page } });
-    const batch = pick(body);
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const batch = pick(await client.request("GET", path, { query: { ...query, limit: PAGE_SIZE, page } }));
+    if (!Array.isArray(batch)) throw new Error(`Unexpected answer from ${path}: no list found.`);
     rows.push(...batch);
-    if (batch.length < PAGE_SIZE) break;
+    if (batch.length < PAGE_SIZE) return { rows, complete: true };
   }
-  return rows;
+  return { rows, complete: false };
 }
 
-function cached<T>(load: () => Promise<T>): () => Promise<T> {
+const INCOMPLETE = `Only the first ${MAX_PAGES * PAGE_SIZE} entries were loaded, so results and totals are incomplete.`;
+
+function cached<T>(load: () => Promise<T>): { get: () => Promise<T>; clear: () => void } {
   let entry: { at: number; value: Promise<T> } | undefined;
-  return () => {
-    if (!entry || Date.now() - entry.at > CACHE_MS) {
-      const value = load();
-      const current = { at: Date.now(), value };
-      entry = current;
-      value.catch(() => {
-        if (entry === current) entry = undefined;
-      });
-    }
-    return entry.value;
+  return {
+    get() {
+      if (!entry || Date.now() - entry.at > CACHE_MS) {
+        const value = load();
+        const current = { at: Date.now(), value };
+        entry = current;
+        value.catch(() => {
+          if (entry === current) entry = undefined;
+        });
+      }
+      return entry.value;
+    },
+    clear() {
+      entry = undefined;
+    },
   };
 }
 
 function paged<T>(items: T[], offset: number, limit: number) {
   const slice = items.slice(offset, offset + limit);
   const next = offset + slice.length;
-  return {
-    total: items.length,
-    offset,
-    count: slice.length,
-    nextOffset: next < items.length ? next : undefined,
-    items: slice,
-  };
+  return { total: items.length, offset, count: slice.length, nextOffset: next < items.length ? next : undefined, items: slice };
 }
 
 function addressView(row: Row, kind: "company" | "person") {
@@ -179,6 +171,7 @@ function addressView(row: Row, kind: "company" | "person") {
       country: a.country_code,
     })),
     contactPersons: row.contact_persons?.map((p: Row) => ({
+      uuid: p.uuid,
       name: [p.first_name, p.last_name].filter(Boolean).join(" "),
       contacts: p.contacts?.map((c: Row) => c.value),
     })),
@@ -187,7 +180,14 @@ function addressView(row: Row, kind: "company" | "person") {
   };
 }
 
-const normalize = (text: string) => text.normalize("NFC").toLowerCase();
+// Lower case without accents ("Zürich" -> "zurich"). The German spelling ("zuerich") is indexed as well.
+const fold = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/ß/g, "ss");
+const germanSpelling = (text: string) =>
+  text.normalize("NFC").toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss");
+const indexText = (parts: unknown[]) => {
+  const text = parts.filter((part) => part !== undefined && part !== null && part !== "").join(" ");
+  return `${fold(text)}\n${germanSpelling(text)}`;
+};
 
 // Phone numbers starting with +, 00 or 0, written with spaces, dots, dashes, slashes or brackets.
 const PHONE = /(?:\+|\b0)\d[\d\s()/.-]{5,}\d/g;
@@ -201,84 +201,138 @@ function phoneKey(text: string): string {
   return digits;
 }
 
+// A phone number has at most 13 digits; digit groups after that (e.g. a postcode) are separate words.
+function splitPhone(candidate: string): [string, string] {
+  const groups = candidate.trim().split(/\s+/);
+  let digits = 0;
+  let count = 0;
+  for (const group of groups) {
+    const length = group.replace(/\(\s*0\s*\)/g, "").replace(/\D/g, "").length;
+    if (count > 0 && digits + length > 13) break;
+    digits += length;
+    count++;
+  }
+  return [groups.slice(0, count).join(" "), groups.slice(count).join(" ")];
+}
+
 // Splits a search query into terms. Each term lists the spellings that count as a match: a word without
 // surrounding punctuation, and for something that looks like a phone number also its digits and phone key,
 // so "01234567" still finds a customer number and "044 123 45 67" finds "+41 44 123 45 67".
 function queryTerms(query: string): string[][] {
-  const text = normalize(query);
-  const phones = (text.match(PHONE) ?? []).map((phone) => [phone.trim(), phone.replace(/\D/g, ""), phoneKey(phone)]);
-  const words = text
-    .replace(PHONE, " ")
-    .split(/[\s,;]+/)
-    .map((word) => word.replace(/^[^\p{L}\p{N}@+]+|[^\p{L}\p{N}]+$/gu, ""))
-    .filter(Boolean)
-    .map((word) => [word]);
-  return [...words, ...phones];
+  const terms: string[][] = [];
+  const rest = fold(query).replace(PHONE, (candidate) => {
+    const [phone, after] = splitPhone(candidate);
+    terms.push([phone, phone.replace(/\D/g, ""), phoneKey(phone)]);
+    return ` ${after} `;
+  });
+  for (const word of rest.split(/[\s,;]+/)) {
+    const clean = word.replace(/^[^\p{L}\p{N}@+]+|[^\p{L}\p{N}]+$/gu, "");
+    if (clean) terms.push([clean]);
+  }
+  return terms;
 }
 
-function searchText(row: Row): string {
-  const contacts: Row[] = [
-    ...(row.contacts ?? []),
-    ...(row.contact_persons ?? []).flatMap((p: Row) => p.contacts ?? []),
-  ];
-  const parts: unknown[] = [
+const matches = (terms: string[][], text: string) => terms.every((spellings) => spellings.some((s) => text.includes(s)));
+
+function addressText(row: Row): string {
+  const contacts: Row[] = [...(row.contacts ?? []), ...(row.contact_persons ?? []).flatMap((p: Row) => p.contacts ?? [])];
+  return indexText([
     row.company_name, row.first_name, row.last_name, row.customer_number, row.id_number, row.vat_number,
     ...(row.tags ?? []),
     ...contacts.map((c) => c.value),
     ...contacts.filter((c) => /phone|mobile|fax/i.test(String(c.type))).map((c) => phoneKey(String(c.value))),
-    ...(row.addresses ?? []).flatMap((a: Row) => [
-      a.address, a.street_number, a.extension, a.additional_field, a.zip_code, a.city,
-    ]),
+    ...(row.addresses ?? []).flatMap((a: Row) => [a.address, a.street_number, a.extension, a.additional_field, a.zip_code, a.city]),
     ...(row.contact_persons ?? []).flatMap((p: Row) => [p.first_name, p.last_name]),
-  ];
-  return normalize(parts.filter(Boolean).join(" "));
+  ]);
 }
 
+// The document number, whatever the type calls it (invoiceNumber, quoteNumber, …).
+function documentNumber(doc: Row): string | undefined {
+  const key = Object.keys(doc).find((k) => /Number$/.test(k) && !/^(customer|imported|system)/i.test(k) && doc[k]);
+  return key ? String(doc[key]) : undefined;
+}
+
+function documentView(doc: Row) {
+  return {
+    uuid: doc.uuid,
+    number: documentNumber(doc),
+    title: doc.title,
+    status: doc.status,
+    date: doc.invoiceDate ?? doc.quoteDate ?? doc.documentDate ?? doc.receiptDate ?? doc.deliveryDate,
+    dueDate: doc.dueDate,
+    customer: doc.receiver?.name,
+    customerNumber: doc.receiver?.customerNumber,
+    companyUuid: doc.receiver?.companyUuid,
+    personUuid: doc.receiver?.personUuid,
+    currency: doc.currencyCode,
+    total: doc.documentTotal,
+    openAmount: doc.openAmount,
+    archived: doc.isArchived || undefined,
+    cancelled: doc.isCancelled || undefined,
+  };
+}
+
+const isCustomer = (doc: Row, uuid: string) => doc.receiver?.companyUuid === uuid || doc.receiver?.personUuid === uuid;
+
+// Turns "/accounts/{accountUuid}/documents/v2/{type}/{uuid}" into a pattern that also matches real values.
+const templatePattern = (path: string) => new RegExp(`^${path.replace(/\{[^}]+\}/g, "[^/]+")}$`, "i");
+
 const methodSchema = z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+const limitSchema = (max: number, fallback: number) => z.number().int().min(1).max(max).default(fallback);
+const offsetSchema = z.number().int().min(0).default(0);
+const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
+
+const MODE_TEXT = {
+  read: "This server runs in read mode: only GET is allowed.",
+  write:
+    "This server runs in write mode: GET, POST, PATCH and PUT are allowed; deleting, sending, dunning, bulk actions, bank details, outgoing webhooks and imports from a URL are refused.",
+  full: "This server runs in full mode: every call is allowed, including deleting and sending. Confirm such calls with the user first.",
+};
 
 export function registerTools(server: McpServer, client: AbaNinjaClient): void {
-  const loadAddresses = cached(async () => {
+  const addresses = cached(async () => {
     const [companies, persons] = await Promise.all([
-      fetchAll(client, "/accounts/{accountUuid}/addresses/v2/companies", {}, (b) => b.data ?? []),
-      fetchAll(client, "/accounts/{accountUuid}/addresses/v2/persons", {}, (b) => b.data ?? []),
+      fetchAll(client, "/accounts/{accountUuid}/addresses/v2/companies", {}, (b) => b?.data),
+      fetchAll(client, "/accounts/{accountUuid}/addresses/v2/persons", {}, (b) => b?.data),
     ]);
-    return [
-      ...companies.map((row) => ({ row, kind: "company" as const })),
-      ...persons.map((row) => ({ row, kind: "person" as const })),
-    ];
+    return {
+      complete: companies.complete && persons.complete,
+      rows: [
+        ...companies.rows.map((row) => ({ row, kind: "company" as const })),
+        ...persons.rows.map((row) => ({ row, kind: "person" as const })),
+      ],
+    };
   });
+  const loadDocuments = (type: string) =>
+    fetchAll(client, `/accounts/{accountUuid}/documents/v2/${type}`, { is_template: false }, (b) => b?.data?.documents);
 
   server.registerTool(
     "abaninja_list_endpoints",
     {
       title: "List AbaNinja API endpoints",
       description:
-        "Find AbaNinja REST API endpoints by area and/or keywords. Areas: accounting, accounts, addresses, documents, exports, finances, holidays, products, time-tracking, units, warehouse, webhooks. Use abaninja_describe_endpoint for details and abaninja_request to call one.",
-      inputSchema: {
-        area: z.string().optional().describe("Area name, e.g. documents"),
-        query: z.string().optional().describe("Keywords that must all appear in method, path or summary, e.g. 'invoice send'"),
-        method: methodSchema.optional(),
-        limit: z.number().int().min(1).max(200).default(40),
-        offset: z.number().int().min(0).default(0),
-      },
+        "Find AbaNinja REST API endpoints by area and keywords. Document actions are named like /actions/email, /actions/markSent or /actions/delete. Use abaninja_describe_endpoint for the fields and abaninja_request to call one.",
+      inputSchema: z
+        .object({
+          area: z.enum(AREAS).optional().describe("Only this area"),
+          query: z.string().optional().describe("Words that must all appear in method, path or summary, e.g. 'invoice email'"),
+          method: methodSchema.optional(),
+          limit: limitSchema(200, 40),
+          offset: offsetSchema,
+        })
+        .strict(),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ area, query, method, limit, offset }) => {
       try {
         const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
-        const hits = loadCatalog().filter((e) => {
-          if (area && e.area !== area.toLowerCase()) return false;
+        const hits = catalog.filter((e) => {
+          if (area && e.area !== area) return false;
           if (method && e.method !== method) return false;
           const text = `${e.method} ${e.path} ${e.summary} ${e.tag ?? ""}`.toLowerCase();
           return words.every((word) => text.includes(word));
         });
-        return reply(
-          paged(
-            hits.map((e) => ({ method: e.method, path: e.path, summary: e.summary })),
-            offset,
-            limit,
-          ),
-        );
+        return reply(paged(hits.map((e) => ({ method: e.method, path: e.path, summary: e.summary })), offset, limit));
       } catch (error) {
         return fail(error);
       }
@@ -290,17 +344,21 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
     {
       title: "Describe an AbaNinja API endpoint",
       description:
-        "Show the parameters and request body fields of one endpoint from the catalog. Path as listed by abaninja_list_endpoints (with {accountUuid}). Fields with required are always needed; requiredIf names the variant that needs them (e.g. type=company), requiredUnless the alternative that replaces them (e.g. isTemplate=true). Nested fields use dots, list items [].",
-      inputSchema: {
-        method: methodSchema,
-        path: z.string().describe("Endpoint path, e.g. /accounts/{accountUuid}/documents/v2/invoices"),
-      },
+        "Show the parameters and request body fields of one endpoint, from the official API description. Fields with required are always needed; requiredIf names the case that needs them (e.g. type=company), requiredUnless the alternative that replaces them (e.g. isTemplate=true). Nested fields use dots, list items []. The live API can be stricter than this description (e.g. Swiss addresses need state). A PATCH on a document replaces the whole document, so send all of its fields.",
+      inputSchema: z
+        .object({
+          method: methodSchema,
+          path: z.string().describe("Path as listed by abaninja_list_endpoints, placeholders or real values both work"),
+        })
+        .strict(),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ method, path }) => {
       try {
-        const wanted = path.replace(/^\/accounts\/[0-9a-f-]{36}/i, "/accounts/{accountUuid}").replace(/\/$/, "");
-        const hit = loadCatalog().find((e) => e.method === method && e.path === wanted);
+        const wanted = path.replace(/\/$/, "");
+        const hit =
+          catalog.find((e) => e.method === method && e.path === wanted) ??
+          catalog.find((e) => e.method === method && templatePattern(e.path).test(wanted));
         if (!hit) {
           throw new Error(`No ${method} ${path} in the catalog. Use abaninja_list_endpoints to find the path.`);
         }
@@ -311,28 +369,43 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
     },
   );
 
+  const changes = client.mode !== "read";
   server.registerTool(
     "abaninja_request",
     {
       title: "Call an AbaNinja API endpoint",
       description:
-        "Call any AbaNinja REST API endpoint. Put {accountUuid} in the path and it is filled in automatically. Which methods and actions are allowed depends on the server mode (ABANINJA_MODE: read = GET only, write = also create/change, full = everything incl. delete/send/dun). POST, PATCH, PUT and DELETE change data in the real account.",
-      inputSchema: {
-        method: methodSchema,
-        path: z
-          .string()
-          .describe("Plain path as listed in the catalog, e.g. /accounts/{accountUuid}/documents/v2/invoices. No query string."),
-        query: z
-          .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number()]))]))
-          .optional()
-          .describe("Query parameters; lists repeat the key, e.g. {\"tags[]\": [\"VIP\", \"A\"]}"),
-        body: z.unknown().optional().describe("JSON request body"),
+        `Call any AbaNinja REST API endpoint. ${MODE_TEXT[client.mode]} ` +
+        "Put {accountUuid} in the path and it is filled in; fill in all other placeholders yourself. " +
+        "Lists take page and limit (up to 400); document lists give no total, so fetch the next page until fewer than limit entries come back. " +
+        "POST, PATCH, PUT and DELETE change the real account: confirm them with the user first.",
+      inputSchema: z
+        .object({
+          method: methodSchema,
+          path: z.string().describe("Plain path as listed in the catalog, e.g. /accounts/{accountUuid}/documents/v2/invoices. No query string."),
+          query: z
+            .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number()]))]))
+            .optional()
+            .describe("Query parameters, e.g. {\"page\": 2, \"limit\": 100}; a list is sent as name[]=a&name[]=b"),
+          body: z
+            .union([z.record(z.string(), z.unknown()), z.array(z.unknown())])
+            .optional()
+            .describe("JSON request body as an object or list"),
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: !changes,
+        destructiveHint: client.mode === "full",
+        idempotentHint: false,
+        openWorldHint: true,
       },
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
     async ({ method, path, query, body }) => {
       try {
-        return reply(await client.request(method, path, { query, body }));
+        const result = await client.request(method, path, { query, body });
+        // A change can affect addresses, so the next search loads them fresh.
+        if (method !== "GET") addresses.clear();
+        return reply(result);
       } catch (error) {
         return fail(error);
       }
@@ -344,29 +417,73 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
     {
       title: "Search AbaNinja addresses",
       description:
-        "Search companies and persons by name, customer number, e-mail, phone, city, tag or contact person. The API has no search, so all addresses are loaded (cached for 60 seconds) and filtered locally. All words in the query must match. Without a query it lists everything page by page.",
-      inputSchema: {
-        query: z.string().optional().describe("Search words, e.g. 'muster zürich'"),
-        kind: z.enum(["company", "person", "all"]).default("all"),
-        tag: z.string().optional().describe("Only addresses with this tag"),
-        include_archived: z.boolean().default(false),
-        limit: z.number().int().min(1).max(100).default(25),
-        offset: z.number().int().min(0).default(0),
-      },
-      annotations: { readOnlyHint: true, openWorldHint: true },
+        "Search companies and persons by name, customer number, e-mail, phone, street, city, tag or contact person. Accents and umlauts do not matter (Zurich, Zürich and Zuerich all match). The API has no search, so all addresses are loaded (kept for 60 seconds, refreshed after changes made through this server) and filtered locally. All words must match; an exact customer number comes first. Without a query it lists everything page by page.",
+      inputSchema: z
+        .object({
+          query: z.string().optional().describe("Search words, e.g. 'muster zürich' or '044 123 45 67'"),
+          kind: z.enum(["company", "person", "all"]).default("all"),
+          tag: z.string().optional().describe("Only addresses with this tag"),
+          include_archived: z.boolean().default(false),
+          limit: limitSchema(100, 25),
+          offset: offsetSchema,
+        })
+        .strict(),
+      annotations: READ_ONLY,
     },
     async ({ query, kind, tag, include_archived, limit, offset }) => {
       try {
         const terms = queryTerms(query ?? "");
-        const hits = (await loadAddresses()).filter(({ row, kind: rowKind }) => {
+        const { rows, complete } = await addresses.get();
+        const hits = rows.filter(({ row, kind: rowKind }) => {
           if (kind !== "all" && rowKind !== kind) return false;
           if (!include_archived && row.isArchived) return false;
-          if (tag && !(row.tags ?? []).some((t: string) => t.toLowerCase() === tag.toLowerCase())) return false;
-          const text = searchText(row);
-          return terms.every((spellings) => spellings.some((spelling) => text.includes(spelling)));
+          if (tag && !(row.tags ?? []).some((t: string) => fold(t) === fold(tag))) return false;
+          return matches(terms, addressText(row));
+        });
+        const exact = (row: Row) => (terms.some((spellings) => spellings.includes(fold(String(row.customer_number ?? "")))) ? 0 : 1);
+        hits.sort((a, b) => exact(a.row) - exact(b.row));
+        const result = paged(hits, offset, limit);
+        return reply({
+          ...(complete ? {} : { incomplete: INCOMPLETE }),
+          ...result,
+          items: result.items.map(({ row, kind: rowKind }) => addressView(row, rowKind)),
+        });
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "abaninja_find_documents",
+    {
+      title: "Find AbaNinja documents",
+      description:
+        "Find invoices, quotes, credit notes and other documents by number, title, reference or customer name, optionally only for one customer or one status. The API cannot search, so all documents of the type are loaded and filtered locally. Returns a short summary per document; abaninja_request GET /accounts/{accountUuid}/documents/v2/{type}/{uuid} gives all details.",
+      inputSchema: z
+        .object({
+          type: z.enum(DOCUMENT_TYPES),
+          query: z.string().optional().describe("Words that must all match, e.g. a document number or a customer name"),
+          customer_uuid: z.string().optional().describe("Company or person uuid from abaninja_search_addresses"),
+          status: z.string().optional().describe("e.g. draft, sent, due, reminder, paid"),
+          limit: limitSchema(100, 25),
+          offset: offsetSchema,
+        })
+        .strict(),
+      annotations: READ_ONLY,
+    },
+    async ({ type, query, customer_uuid, status, limit, offset }) => {
+      try {
+        const terms = queryTerms(query ?? "");
+        const { rows, complete } = await loadDocuments(type);
+        const hits = rows.filter((doc) => {
+          if (customer_uuid && !isCustomer(doc, customer_uuid)) return false;
+          if (status && String(doc.status).toLowerCase() !== status.toLowerCase()) return false;
+          const numbers = Object.keys(doc).filter((k) => /Number$/.test(k)).map((k) => doc[k]);
+          return matches(terms, indexText([...numbers, doc.title, doc.reference, doc.receiver?.name, doc.status]));
         });
         const result = paged(hits, offset, limit);
-        return reply({ ...result, items: result.items.map(({ row, kind: rowKind }) => addressView(row, rowKind)) });
+        return reply({ ...(complete ? {} : { incomplete: INCOMPLETE }), ...result, items: result.items.map(documentView) });
       } catch (error) {
         return fail(error);
       }
@@ -378,34 +495,30 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
     {
       title: "List open AbaNinja invoices",
       description:
-        "Open invoices (openAmount > 0, not cancelled, no templates; drafts only with include_drafts) with amount, due date and dunning level, sorted by due date. Totals are given per currency (CHF and EUR are never added up). Optionally only for one customer: pass the company or person uuid from abaninja_search_addresses. The API has no customer filter, so invoices are loaded and filtered locally.",
-      inputSchema: {
-        company_uuid: z.string().optional().describe("Customer company uuid (receiver.companyUuid)"),
-        person_uuid: z.string().optional().describe("Customer person uuid (receiver.personUuid)"),
-        overdue_only: z.boolean().default(false),
-        include_drafts: z.boolean().default(false).describe("Drafts have an open amount but are not yet claims"),
-        limit: z.number().int().min(1).max(200).default(50),
-        offset: z.number().int().min(0).default(0),
-      },
-      annotations: { readOnlyHint: true, openWorldHint: true },
+        "Open invoices (openAmount > 0, not cancelled, no templates; drafts only with include_drafts) with amount, due date and dunning level, sorted by due date. Totals are given per currency (CHF and EUR are never added up). Open credit notes are not deducted; find them with abaninja_find_documents type credit-notes. Optionally only for one customer: pass the company or person uuid from abaninja_search_addresses.",
+      inputSchema: z
+        .object({
+          customer_uuid: z.string().optional().describe("Company or person uuid from abaninja_search_addresses"),
+          overdue_only: z.boolean().default(false),
+          include_drafts: z.boolean().default(false).describe("Drafts have an open amount but are not yet claims"),
+          limit: limitSchema(200, 50),
+          offset: offsetSchema,
+        })
+        .strict(),
+      annotations: READ_ONLY,
     },
-    async ({ company_uuid, person_uuid, overdue_only, include_drafts, limit, offset }) => {
+    async ({ customer_uuid, overdue_only, include_drafts, limit, offset }) => {
       try {
-        const invoices = await fetchAll(
-          client,
-          "/accounts/{accountUuid}/documents/v2/invoices",
-          { is_template: false },
-          (b) => b.data?.documents ?? [],
-        );
+        const { rows, complete } = await loadDocuments("invoices");
         const today = swissToday();
         const isOverdue = (i: Row) => !!i.dueDate && String(i.dueDate).slice(0, 10) < today;
-        const open = invoices
+        const open = rows
           .filter((i) => Number(i.openAmount) > 0 && !i.isCancelled && !i.isTemplate)
           .filter((i) => include_drafts || i.status !== "draft")
-          .filter((i) => !company_uuid || i.receiver?.companyUuid === company_uuid)
-          .filter((i) => !person_uuid || i.receiver?.personUuid === person_uuid)
+          .filter((i) => !customer_uuid || isCustomer(i, customer_uuid))
           .filter((i) => !overdue_only || isOverdue(i))
-          .sort((a, b) => String(a.dueDate ?? "").localeCompare(String(b.dueDate ?? "")));
+          // Undated invoices go last.
+          .sort((a, b) => String(a.dueDate ?? "9999").localeCompare(String(b.dueDate ?? "9999")));
         // Amounts are summed per currency: CHF and EUR must never be added up.
         const totals: Record<string, number> = {};
         for (const i of open) {
@@ -417,26 +530,15 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
         }
         const result = paged(open, offset, limit);
         return reply({
+          ...(complete ? {} : { incomplete: INCOMPLETE }),
           total: result.total,
           totalOpenAmountByCurrency: totals,
           offset: result.offset,
           count: result.count,
           nextOffset: result.nextOffset,
           items: result.items.map((i) => ({
-            uuid: i.uuid,
-            invoiceNumber: i.invoiceNumber,
-            title: i.title,
-            status: i.status,
-            customer: i.receiver?.name,
-            customerNumber: i.receiver?.customerNumber,
-            companyUuid: i.receiver?.companyUuid,
-            personUuid: i.receiver?.personUuid,
-            invoiceDate: i.invoiceDate,
-            dueDate: i.dueDate,
+            ...documentView(i),
             overdue: i.dueDate ? isOverdue(i) : undefined,
-            currency: i.currencyCode,
-            documentTotal: i.documentTotal,
-            openAmount: i.openAmount,
             dunningLevel: i.dunningLevel,
             nextDunningDate: i.nextDunningDate,
           })),

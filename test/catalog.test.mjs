@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { PATH_PATTERN } from "../dist/abaninja.js";
 
 const catalog = JSON.parse(readFileSync(new URL("../catalog/endpoints.json", import.meta.url), "utf8"));
 const endpoint = (method, path) => catalog.find((e) => e.method === method && e.path === path);
@@ -9,7 +10,7 @@ const field = (entry, name) => entry?.body?.find((f) => f.name === name);
 
 test("every catalog path is a plain path that abaninja_request accepts", () => {
   for (const entry of catalog) {
-    assert.match(entry.path, /^(\/[A-Za-z0-9{}_-]+)+$/, entry.path);
+    assert.match(entry.path, PATH_PATTERN, entry.path);
   }
 });
 
