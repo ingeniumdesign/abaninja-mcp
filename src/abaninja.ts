@@ -74,6 +74,10 @@ export class AbaNinjaClient {
   async request(method: string, path: string, options: { query?: Query; body?: unknown } = {}): Promise<unknown> {
     const blocked = checkAllowed(this.config.mode, method, path);
     if (blocked) throw new Error(blocked);
+    // Keep the bearer token on api.abaninja.ch: only plain paths, no full URLs or "//host".
+    if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\") || path.includes("://")) {
+      throw new Error("path must be an API path starting with a single /, not a URL.");
+    }
     const resolved = path.includes("{accountUuid}")
       ? path.replace("{accountUuid}", await this.getAccountUuid())
       : path;

@@ -6,7 +6,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { AbaNinjaClient, loadConfig } from "./abaninja.js";
 import { registerTools } from "./tools.js";
 
-const config = loadConfig();
+let config;
+try {
+  config = loadConfig();
+} catch (error) {
+  console.error(`abaninja-mcp: ${error instanceof Error ? error.message : error}`);
+  process.exit(1);
+}
 const client = new AbaNinjaClient(config);
 const server = new McpServer({ name: "abaninja-mcp", version: "0.1.0" });
 

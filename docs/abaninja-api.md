@@ -27,6 +27,8 @@ Was beim Bau dieses Servers an der AbaNinja-API aufgefallen ist. Stand Oktober 2
 
 ## Adressen
 
+- Die Listen von Firmen und Personen liefern die Seitenangaben in `meta` (`total`, `last_page`) und ein `links`-Array, das nur die Antwort aufbläht.
+
 - Firmen und Personen liegen getrennt unter `/addresses/v2/companies` und `/addresses/v2/persons`. Angelegt wird beides über `POST /addresses/v2/addresses`.
 - Es gibt keine Suche und keinen Filter «geändert seit», nur `tags[]`. Für eine Suche alle Adressen laden und lokal filtern.
 - Die Datensätze haben keine Zeitstempel.
@@ -39,6 +41,7 @@ Was beim Bau dieses Servers an der AbaNinja-API aufgefallen ist. Stand Oktober 2
 - Listen liefern `{ status, message, data: { documents: [...] } }`.
 - `updatedSince` funktioniert mit Datum (`2026-10-01`) und mit Datum und Uhrzeit.
 - Rechnungen enthalten unter anderem `status`, `documentTotal`, `openAmount`, `dueDate`, `dunningLevel`, `updatedAt` und `receiver` mit `companyUuid`, `personUuid`, `addressUuid` und `customerNumber`. Den Kunden findet man über `companyUuid` (Firma) oder `personUuid` (Privatperson). `addressUuid` ist die UUID der Postadresse innerhalb des Kunden (`addresses[].uuid`), nicht die des Kunden selbst.
+- Entwürfe (`status: draft`) haben bereits einen `openAmount`, sind aber noch keine Forderung. Weitere Status bei offenen Rechnungen: `sent`, `due`, `reminder`.
 - Einen Filter nach Kunde gibt es nicht, deshalb wird lokal gefiltert.
 - Für Dokumente gibt es viele Aktionen wie `/actions/email`, `/actions/cancel` oder `/bulk-actions/…`. Der Modus `write` sperrt die riskanten davon.
 
@@ -46,3 +49,8 @@ Was beim Bau dieses Servers an der AbaNinja-API aufgefallen ist. Stand Oktober 2
 
 - Es gibt nur zwei Ereignisse: `payment-received` und `product-updated`.
 - Signatur: HMAC-SHA256 über den Rohinhalt, im Header `x-abaninja-signature-sha256`.
+
+## OpenAPI-Specs
+
+- Es gibt Specs für `accounting`, `accounts`, `addresses`, `documents`, `exports`, `finances`, `holidays`, `products`, `time-tracking`, `units`, `warehouse` und `webhooks` (`/specs/<bereich>-v2.json`). Zusammen sind das 539 Endpunkte, davon über die Hälfte in `documents` (die Spec ist rund 2.6 MB gross).
+- Die Specs enthalten die Schemas direkt, ohne `$ref`. `npm run catalog` verdichtet sie zu `catalog/endpoints.json`.
