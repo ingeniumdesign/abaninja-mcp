@@ -148,10 +148,10 @@ test("requests go to api.abaninja.ch with the account filled in and lists sent a
   assert.equal(url.searchParams.get("limit"), "5");
 });
 
-test("the server stays in its account, needs filled placeholders and a JSON body", async () => {
+test("the server stays in its account, needs filled placeholders and sends no body with GET", async () => {
   await assert.rejects(client("read").request("GET", `/accounts/${OTHER_ACCOUNT}/addresses/v2/companies`), /Other accounts/);
   await assert.rejects(client("read").request("GET", "/accounts/{accountUuid}/documents/v2/invoices/{invoiceUuid}"), /Fill in \{invoiceUuid\}/);
-  await assert.rejects(client("write").request("POST", "/accounts/{accountUuid}/addresses/v2/addresses", { body: "{\"type\":\"company\"}" }), /JSON object/);
+  await assert.rejects(client("read").request("GET", "/accounts/{accountUuid}/addresses/v2/companies", { body: {} }), /GET takes no body/);
   assert.equal(calls.length, 0);
   await client("read").request("GET", `/accounts/${ACCOUNT}/addresses/v2/companies`);
   assert.equal(calls.length, 1);

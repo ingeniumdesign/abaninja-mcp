@@ -11,7 +11,7 @@ export interface Config {
 }
 
 export type Query = Record<string, string | number | boolean | (string | number)[]>;
-type RequestOptions = { query?: Query; body?: unknown };
+type RequestOptions = { query?: Query; body?: Record<string, unknown> | unknown[] };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -96,7 +96,7 @@ export function checkAllowed(mode: Mode, method: string, path: string, body?: un
     return "A _method parameter would change the HTTP method. It is only allowed in full mode.";
   }
   if (verb === "GET") return null;
-  if (mode === "read") return `${verb} is not allowed in read mode. Set ABANINJA_MODE=write to allow changes.`;
+  if (mode === "read") return `${verb} is not allowed in read mode. The user can allow changes with ABANINJA_MODE or the Claude Desktop extension settings.`;
   if (!["POST", "PATCH", "PUT"].includes(verb)) return `${verb} is only allowed in full mode.`;
   const blockedPath = BLOCKED_PATHS.find((rule) => rule.pattern.test(path));
   if (blockedPath) return `This call ${blockedPath.reason}. It is only allowed in full mode.`;
@@ -155,13 +155,13 @@ export class AbaNinjaClient {
       result = (await this.send("GET", "/users/v2/me/accounts")) as typeof result;
     } catch (error) {
       throw new Error(
-        `Could not list the token's accounts (${(error as Error).message.slice(0, 80)}). Set ABANINJA_ACCOUNT_UUID, or give the token the "profile" scope.`,
+        `Could not list the token's accounts (${(error as Error).message.slice(0, 80)}). Set ABANINJA_ACCOUNT_UUID (Claude Desktop: Konto-UUID), or give the token the "profile" scope.`,
       );
     }
     const accounts = result.data ?? [];
     if (accounts.length !== 1) {
       const list = accounts.map((a) => `${a.name ?? "?"} (${a.uuid})`).join(", ") || "none";
-      throw new Error(`The token can access ${accounts.length} accounts: ${list}. Set ABANINJA_ACCOUNT_UUID to one of them.`);
+      throw new Error(`The token can access ${accounts.length} accounts: ${list}. Set ABANINJA_ACCOUNT_UUID (Claude Desktop: Konto-UUID) to one of them.`);
     }
     return accounts[0].uuid;
   }
@@ -171,7 +171,7 @@ export class AbaNinjaClient {
     if (!PATH_PATTERN.test(path)) {
       throw new Error("path must be a plain API path like /accounts/{accountUuid}/documents/v2/invoices. Put query parameters into query.");
     }
-    if (typeof options.body === "string") throw new Error("body must be a JSON object or list, not a string.");
+    if (options.body !== undefined && method.toUpperCase() === "GET") throw new Error("GET takes no body. Put parameters into query.");
     const blocked = checkAllowed(this.config.mode, method, path, options.body, options.query);
     if (blocked) throw new Error(blocked);
     const accountsInPath = [...path.matchAll(/\/accounts\/([0-9a-f]{8}-[0-9a-f-]{27})/gi)].map((match) => match[1].toLowerCase());
@@ -221,7 +221,7 @@ export class AbaNinjaClient {
         const code = (error as { cause?: { code?: string } }).cause?.code;
         throw new Error(`Could not reach api.abaninja.ch${code ? ` (${code})` : ""}. Check the network or proxy settings.`);
       }
-      // Rate limits are retried for every call, server hiccups only for reads, which cannot run twice.
+      // Rate limits are retried for every call, server errors only for GET, since a write must not run twice.
       const retry = response.status === 429 || (verb === "GET" && [502, 503, 504].includes(response.status));
       if (!retry || attempt === 3) break;
       const seconds = Math.min(Number(response.headers.get("retry-after")) || attempt * 2, 10);

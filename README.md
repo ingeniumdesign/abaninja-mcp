@@ -41,7 +41,7 @@ Datei-Uploads sind nicht möglich. PDFs und andere Dateien zeigt der Server nur 
 ```bash
 npm test                  # Tests ohne Netz
 npm run catalog           # Endpunkt-Katalog aus den OpenAPI-Specs neu erzeugen
-npm run live              # Live-Test gegen ein echtes Konto, nur lesend
+npm run live              # Live-Test gegen ein echtes Konto (Token in .env), nur lesend
 npm run live -- --write   # legt Testdaten an, ändert und löscht sie wieder
 npm run bundle            # Erweiterung für Claude Desktop bauen
 ```

@@ -8,7 +8,7 @@
 // "ZZ-Test abaninja-mcp" and tracked in .live-test-state.json until they are deleted: a company, a person,
 // a product and a draft quote and draft invoice for the test company. Draft documents take the next number
 // of their number range, so deleting them leaves a gap there.
-// Needs a build (npm run build). Reads ABANINJA_API_TOKEN from the environment or ../../.env. Never prints it.
+// Reads ABANINJA_API_TOKEN from the environment or .env. Never prints it.
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -16,7 +16,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const TEST_NAME = "ZZ-Test abaninja-mcp";
 const ACCOUNT = "/accounts/{accountUuid}";
 const STATE_FILE = new URL("../.live-test-state.json", import.meta.url);
-const ENV_FILE = new URL("../../.env", import.meta.url);
+const ENV_FILE = new URL("../.env", import.meta.url);
 const catalog = JSON.parse(readFileSync(new URL("../catalog/endpoints.json", import.meta.url), "utf8"));
 
 if (!process.env.ABANINJA_API_TOKEN && existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);

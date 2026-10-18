@@ -203,8 +203,7 @@ test("find_documents: by number (exact first), text, customer and status, with d
   assert.equal((await call("abaninja_find_documents", { type: "receipts", status: "paid" })).isError, true, "receipts have no status");
   invoices = Array.from({ length: 450 }, (_, n) => ({ uuid: `n${n + 1}`, invoiceNumber: String(n + 1).padStart(8, "0"), status: "paid", currencyCode: "CHF", openAmount: 0 }));
   const byNumber = await find({ type: "invoices", query: "00000042" });
-  assert.equal(byNumber[0].number, "00000042");
-  assert.ok(byNumber.length <= 2, "no phone-number spellings");
+  assert.deepEqual(byNumber.map((d) => d.number), ["00000042"], "no phone-number spellings");
 });
 
 test("the request tool tells the assistant its mode and rejects paths that would leave api.abaninja.ch", async () => {

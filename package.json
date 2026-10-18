@@ -31,7 +31,7 @@
     "build": "tsc",
     "catalog": "node scripts/generate-catalog.mjs",
     "test": "npm run build && node --test \"test/*.test.mjs\"",
-    "live": "node scripts/live-test.mjs",
+    "live": "npm run build && node scripts/live-test.mjs",
     "prepare": "npm run build",
     "bundle": "npm run build && node scripts/build-mcpb.mjs"
   },

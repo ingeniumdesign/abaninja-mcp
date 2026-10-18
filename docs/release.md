@@ -14,7 +14,7 @@
    ```
 2. Committen, taggen, pushen. GitHub Actions testet, baut `abaninja-mcp.mcpb` und erstellt das Release:
    ```bash
-   git commit -am "Release 0.1.1" && git tag v0.1.1 && git push --follow-tags
+   git commit -am "Release 0.1.1" && git tag -a v0.1.1 -m "Release 0.1.1" && git push --follow-tags
    ```
 3. Auf npm veröffentlichen:
    ```bash
