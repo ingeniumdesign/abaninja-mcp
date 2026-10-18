@@ -291,7 +291,21 @@ const nothingLeft = (state) => !state.companyUuid && !state.personUuid && !state
 
 async function cleanup() {
   const state = loadState();
-  if (nothingLeft(state)) return;
+  if (!nothingLeft(state)) await deleteTracked(state);
+  // Test-named records that are not tracked are only reported, never deleted.
+  const reader = await connect("read");
+  const left = await reader.call("abaninja_search_addresses", { query: TEST_NAME, include_archived: true });
+  const found = (left.json?.items ?? []).map((item) => `${item.name} (${item.uuid})`).join(", ");
+  check("no test addresses left", left.json?.total === 0, found ? `check by hand: ${found}` : "");
+  await reader.close();
+  if (nothingLeft(state)) {
+    if (existsSync(STATE_FILE)) unlinkSync(STATE_FILE);
+  } else {
+    console.log(`Left over, see ${STATE_FILE.pathname}: ${JSON.stringify(state)}`);
+  }
+}
+
+async function deleteTracked(state) {
   console.log("\n== Cleanup: delete the test records (full mode, own uuids only)");
   const server = await connect("full");
   for (const document of [...(state.documents ?? [])]) {
@@ -317,11 +331,7 @@ async function cleanup() {
     if (ok) delete state[key];
     saveState(state);
   }
-  const left = await server.call("abaninja_search_addresses", { query: TEST_NAME, include_archived: true });
-  check("no test addresses left", left.json?.total === 0, `${left.json?.total ?? "?"} found`);
   await server.close();
-  if (nothingLeft(state)) unlinkSync(STATE_FILE);
-  else console.log(`Left over, see ${STATE_FILE.pathname}: ${JSON.stringify(state)}`);
 }
 
 if (!env.ABANINJA_API_TOKEN) throw new Error("ABANINJA_API_TOKEN is not set.");
@@ -330,7 +340,10 @@ if (options.has("--cleanup")) {
 } else {
   await readTest();
   if (options.has("--write")) {
-    const state = loadState();
+    // Records of an interrupted earlier run are removed first, so no tracked uuid gets overwritten.
+    if (!nothingLeft(loadState())) await cleanup();
+    if (!nothingLeft(loadState())) throw new Error("Test records of an earlier run are left, see .live-test-state.json.");
+    const state = {};
     try {
       await writeTest(state);
     } finally {

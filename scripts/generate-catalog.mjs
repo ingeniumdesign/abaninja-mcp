@@ -270,6 +270,9 @@ export function fieldsOf(schema, prefix = "", depth = 1) {
       if (unless.length) field.requiredUnless = unless.join(" or ");
     }
     if (exclusions.has(name)) field.notWith = [...exclusions.get(name)].join(", ");
+    // A null variant with a meaning ("No bank account will be used") is kept as a note.
+    const nullVariant = (prop.oneOf ?? prop.anyOf ?? []).find((v) => isNull(v) && (v.title || v.description));
+    if (nullVariant) field.nullMeans = short(nullVariant.title ?? nullVariant.description);
     const description = descriptionOf(prop);
     if (prop.deprecated || /^deprecated/i.test(description ?? "")) field.deprecated = true;
     if (description) field.description = description;

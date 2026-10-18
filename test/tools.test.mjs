@@ -44,6 +44,15 @@ const companies = [
     addresses: [{ uuid: "a3", address: "Seeweg", street_number: "2", zip_code: "6300", city: "Zug", country_code: "CH" }],
   },
 ];
+companies.push({
+  uuid: "c4",
+  customer_number: "B0001",
+  company_name: "Bäckerei Mueller AG",
+  addresses: [{ uuid: "a4", address: "Hauptstrasse", street_number: "5", zip_code: "8001", city: "Zuerich", country_code: "CH" }],
+});
+const creditNotes = [{ uuid: "g1", creditNoteNumber: "G0001", creditNoteDate: "2026-09-30", status: "sent", currencyCode: "CHF", documentTotal: 50, receiver: { companyUuid: "c1", name: "Müller AG" } }];
+const receipts = [{ uuid: "b1", receiptNumber: "B-77", invoiceDate: "2026-09-01", currencyCode: "CHF", documentTotal: 89, receiver: { companyUuid: "s1", receiverInformation: { name: "Swisscom AG", customerNumber: "L0001" } } }];
+const padded = Array.from({ length: 450 }, (_, n) => ({ uuid: `n${n + 1}`, invoiceNumber: String(n + 1).padStart(8, "0"), status: "paid", currencyCode: "CHF", openAmount: 0 }));
 const persons = [{ uuid: "p1", customer_number: "P0001", first_name: "René", last_name: "Egger", addresses: [] }];
 
 let invoices = sampleInvoices;
@@ -55,6 +64,8 @@ globalThis.fetch = async (input, init) => {
   if (init.method !== "GET") return json({ data: { uuid: "new" } });
   if (url.pathname.endsWith("/documents/v2/invoices")) return json({ status: 200, message: "", data: { documents: page(invoices) } });
   if (url.pathname.endsWith("/documents/v2/quotes")) return json({ status: 200, message: "", data: { documents: page(quotes) } });
+  if (url.pathname.endsWith("/documents/v2/credit-notes")) return json({ status: 200, message: "", data: { documents: page(creditNotes) } });
+  if (url.pathname.endsWith("/documents/v2/receipts")) return json({ status: 200, message: "", data: { documents: page(receipts) } });
   if (url.pathname.endsWith("/addresses/v2/companies")) {
     addressLoads++;
     return json({ data: page(companies), meta: { total: companies.length } });
@@ -192,7 +203,7 @@ test("documents can be found by number, text, customer and status", async () => 
 });
 
 test("the request tool tells the assistant its mode and rejects paths that would leave api.abaninja.ch", async () => {
-  for (const [mode, readOnly, destructive] of [["read", true, false], ["write", false, false], ["full", false, true]]) {
+  for (const [mode, readOnly, destructive] of [["read", true, false], ["write", false, true], ["full", false, true]]) {
     const call = await connect(mode);
     const tool = (await call.listTools()).tools.find((t) => t.name === "abaninja_request");
     assert.match(tool.description, new RegExp(`${mode} mode`));
@@ -210,4 +221,35 @@ test("describe_endpoint accepts placeholders or real values", async () => {
   const b = await call("abaninja_describe_endpoint", { method: "PATCH", path: "/accounts/00000000-0000-4000-8000-000000000000/addresses/v2/companies/c1" });
   assert.equal(a.isError, false);
   assert.equal(b.json.path, a.json.path);
+});
+
+test("umlauts work in both directions between search words and stored data", async () => {
+  const call = await connect();
+  for (const query of ["Müller", "Muller", "Mueller", "Zürich", "Zurich", "Zuerich"]) {
+    const uuids = (await call("abaninja_search_addresses", { query })).json.items.map((i) => i.uuid);
+    assert.ok(uuids.includes("c4"), `${query} finds the company stored as Mueller in Zuerich`);
+  }
+});
+
+test("describe_endpoint prefers literal segments over placeholders", async () => {
+  const call = await connect();
+  const account = "/accounts/00000000-0000-4000-8000-000000000000";
+  for (const literal of ["/documents/v2/invoices/settings/dunnings", "/documents/v2/invoices/bulk-actions"]) {
+    const result = await call("abaninja_describe_endpoint", { method: "GET", path: account + literal });
+    assert.equal(result.json.path, "/accounts/{accountUuid}" + literal);
+  }
+});
+
+test("find_documents: exact numbers first, dates and suppliers for every type, status only where it exists", async () => {
+  invoices = padded;
+  const call = await connect();
+  const byNumber = (await call("abaninja_find_documents", { type: "invoices", query: "00000042" })).json;
+  assert.equal(byNumber.items[0].number, "00000042");
+  assert.ok(byNumber.total <= 2, "no phone-number spellings");
+  invoices = sampleInvoices;
+  const credit = (await call("abaninja_find_documents", { type: "credit-notes", query: "G0001" })).json.items[0];
+  assert.equal(credit.date, "2026-09-30");
+  const receipt = (await call("abaninja_find_documents", { type: "receipts", query: "swisscom" })).json.items[0];
+  assert.equal(receipt.customer, "Swisscom AG");
+  assert.equal((await call("abaninja_find_documents", { type: "receipts", status: "paid" })).isError, true);
 });

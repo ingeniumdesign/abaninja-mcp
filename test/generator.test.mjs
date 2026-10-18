@@ -65,3 +65,13 @@ test("types show constants, patterns, maps and deprecation", () => {
   const body = fields({ type: "object", properties: { total: { type: "number", description: "Deprecated: derived from the positions." } } });
   assert.equal(body.total.deprecated, true);
 });
+
+test("a null variant with a meaning is kept as nullMeans", () => {
+  const body = fields({
+    type: "object",
+    properties: {
+      paymentInstructions: { oneOf: [{ type: "null", title: "No bank account will be used" }, { type: "object", properties: { bankAccountUuid: { type: "string" } } }] },
+    },
+  });
+  assert.equal(body.paymentInstructions.nullMeans, "No bank account will be used");
+});

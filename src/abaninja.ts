@@ -56,6 +56,8 @@ const BLOCKED_FIELDS: { field: string; reason: string }[] = [
   { field: "sendPaymentConfirmation", reason: "e-mails a payment confirmation to the customer" },
   { field: "automatic_dunning", reason: "switches on automatic dunning" },
   { field: "documentUrl", reason: "makes AbaNinja download a file from another address" },
+  { field: "iban", reason: "sets the bank account customers pay to" },
+  { field: "qrIban", reason: "sets the bank account customers pay to" },
 ];
 
 const PAYMENTS = /\/finances\/v2\/payments(\/[^/]+)?$/i;

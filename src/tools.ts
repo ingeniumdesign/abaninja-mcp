@@ -180,14 +180,18 @@ function addressView(row: Row, kind: "company" | "person") {
   };
 }
 
-// Lower case without accents ("Zürich" -> "zurich"). The German spelling ("zuerich") is indexed as well.
-const fold = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/ß/g, "ss");
-const germanSpelling = (text: string) =>
-  text.normalize("NFC").toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss");
-const indexText = (parts: unknown[]) => {
-  const text = parts.filter((part) => part !== undefined && part !== null && part !== "").join(" ");
-  return `${fold(text)}\n${germanSpelling(text)}`;
-};
+// Lower case without accents, ae/oe/ue read as a/o/u, so "Zürich", "Zurich" and "Zuerich" are the same word.
+// Query and data go through the same folding, so it works in both directions.
+const fold = (text: string) =>
+  text
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/ß/g, "ss")
+    .replace(/ae/g, "a")
+    .replace(/oe/g, "o")
+    .replace(/ue/g, "u");
+const indexText = (parts: unknown[]) => fold(parts.filter((part) => part !== undefined && part !== null && part !== "").join(" "));
 
 // Phone numbers starting with +, 00 or 0, written with spaces, dots, dashes, slashes or brackets.
 const PHONE = /(?:\+|\b0)\d[\d\s()/.-]{5,}\d/g;
@@ -216,15 +220,17 @@ function splitPhone(candidate: string): [string, string] {
 }
 
 // Splits a search query into terms. Each term lists the spellings that count as a match: a word without
-// surrounding punctuation, and for something that looks like a phone number also its digits and phone key,
-// so "01234567" still finds a customer number and "044 123 45 67" finds "+41 44 123 45 67".
-function queryTerms(query: string): string[][] {
+// surrounding punctuation, and (with phones) for something that looks like a phone number also its digits
+// and phone key, so "01234567" still finds a customer number and "044 123 45 67" finds "+41 44 123 45 67".
+function queryTerms(query: string, phones = true): string[][] {
   const terms: string[][] = [];
-  const rest = fold(query).replace(PHONE, (candidate) => {
-    const [phone, after] = splitPhone(candidate);
-    terms.push([phone, phone.replace(/\D/g, ""), phoneKey(phone)]);
-    return ` ${after} `;
-  });
+  const rest = phones
+    ? fold(query).replace(PHONE, (candidate) => {
+        const [phone, after] = splitPhone(candidate);
+        terms.push([phone, phone.replace(/\D/g, ""), phoneKey(phone)]);
+        return ` ${after} `;
+      })
+    : fold(query);
   for (const word of rest.split(/[\s,;]+/)) {
     const clean = word.replace(/^[^\p{L}\p{N}@+]+|[^\p{L}\p{N}]+$/gu, "");
     if (clean) terms.push([clean]);
@@ -252,16 +258,23 @@ function documentNumber(doc: Row): string | undefined {
   return key ? String(doc[key]) : undefined;
 }
 
+// The customer or supplier name; receipts keep it in receiver.receiverInformation.
+const receiverName = (doc: Row) =>
+  doc.receiver?.name ?? doc.receiver?.receiverInformation?.name ?? doc.receiver?.receiverInformation?.companyName;
+const receiverNumber = (doc: Row) => doc.receiver?.customerNumber ?? doc.receiver?.receiverInformation?.customerNumber;
+
 function documentView(doc: Row) {
   return {
     uuid: doc.uuid,
     number: documentNumber(doc),
     title: doc.title,
     status: doc.status,
-    date: doc.invoiceDate ?? doc.quoteDate ?? doc.documentDate ?? doc.receiptDate ?? doc.deliveryDate,
+    date:
+      doc.invoiceDate ?? doc.quoteDate ?? doc.creditNoteDate ?? doc.deliveryNoteDate ?? doc.contractNoteDate ??
+      doc.supplierCreditNoteDate ?? doc.receiptDate ?? doc.documentDate,
     dueDate: doc.dueDate,
-    customer: doc.receiver?.name,
-    customerNumber: doc.receiver?.customerNumber,
+    customer: receiverName(doc),
+    customerNumber: receiverNumber(doc),
     companyUuid: doc.receiver?.companyUuid,
     personUuid: doc.receiver?.personUuid,
     currency: doc.currencyCode,
@@ -276,6 +289,19 @@ const isCustomer = (doc: Row, uuid: string) => doc.receiver?.companyUuid === uui
 
 // Turns "/accounts/{accountUuid}/documents/v2/{type}/{uuid}" into a pattern that also matches real values.
 const templatePattern = (path: string) => new RegExp(`^${path.replace(/\{[^}]+\}/g, "[^/]+")}$`, "i");
+const placeholderCount = (path: string) => (path.match(/\{/g) ?? []).length;
+
+// The catalog entry for a path with placeholders or real values. A literal segment beats a placeholder,
+// so ".../invoices/settings/dunnings" is not taken for ".../invoices/{invoiceUuid}/dunnings".
+function findEndpoint(method: string, path: string): Endpoint | undefined {
+  const wanted = path.replace(/\/$/, "").replace(/^\/accounts\/[0-9a-f]{8}-[0-9a-f-]{27}(?=\/|$)/i, "/accounts/{accountUuid}");
+  return (
+    catalog.find((e) => e.method === method && e.path === wanted) ??
+    catalog
+      .filter((e) => e.method === method && templatePattern(e.path).test(wanted))
+      .sort((a, b) => placeholderCount(a.path) - placeholderCount(b.path))[0]
+  );
+}
 
 const methodSchema = z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const limitSchema = (max: number, fallback: number) => z.number().int().min(1).max(max).default(fallback);
@@ -285,7 +311,7 @@ const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
 const MODE_TEXT = {
   read: "This server runs in read mode: only GET is allowed.",
   write:
-    "This server runs in write mode: GET, POST, PATCH and PUT are allowed; deleting, sending, dunning, bulk actions, bank details, outgoing webhooks and imports from a URL are refused.",
+    "This server runs in write mode: GET, POST, PATCH and PUT are allowed; deleting, sending, dunning, bulk actions, bank details (bank accounts, IBAN or QR-IBAN in documents), outgoing webhooks and imports from a URL are refused.",
   full: "This server runs in full mode: every call is allowed, including deleting and sending. Confirm such calls with the user first.",
 };
 
@@ -355,10 +381,7 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
     },
     async ({ method, path }) => {
       try {
-        const wanted = path.replace(/\/$/, "");
-        const hit =
-          catalog.find((e) => e.method === method && e.path === wanted) ??
-          catalog.find((e) => e.method === method && templatePattern(e.path).test(wanted));
+        const hit = findEndpoint(method, path);
         if (!hit) {
           throw new Error(`No ${method} ${path} in the catalog. Use abaninja_list_endpoints to find the path.`);
         }
@@ -395,7 +418,7 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
         .strict(),
       annotations: {
         readOnlyHint: !changes,
-        destructiveHint: client.mode === "full",
+        destructiveHint: changes,
         idempotentHint: false,
         openWorldHint: true,
       },
@@ -474,14 +497,21 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
     },
     async ({ type, query, customer_uuid, status, limit, offset }) => {
       try {
-        const terms = queryTerms(query ?? "");
+        // Document numbers are no phone numbers: "00000042" must not also find "00000420".
+        const terms = queryTerms(query ?? "", false);
         const { rows, complete } = await loadDocuments(type);
+        if (status && rows.length && rows.every((doc) => doc.status === undefined)) {
+          throw new Error(`Documents of type ${type} have no status. Leave out status.`);
+        }
         const hits = rows.filter((doc) => {
           if (customer_uuid && !isCustomer(doc, customer_uuid)) return false;
           if (status && String(doc.status).toLowerCase() !== status.toLowerCase()) return false;
           const numbers = Object.keys(doc).filter((k) => /Number$/.test(k)).map((k) => doc[k]);
-          return matches(terms, indexText([...numbers, doc.title, doc.reference, doc.receiver?.name, doc.status]));
+          return matches(terms, indexText([...numbers, doc.title, doc.reference, receiverName(doc), receiverNumber(doc), doc.status]));
         });
+        // A document whose number equals a search word comes first.
+        const exact = (doc: Row) => (terms.some((spellings) => spellings.includes(fold(documentNumber(doc) ?? "\0"))) ? 0 : 1);
+        hits.sort((a, b) => exact(a) - exact(b));
         const result = paged(hits, offset, limit);
         return reply({ ...(complete ? {} : { incomplete: INCOMPLETE }), ...result, items: result.items.map(documentView) });
       } catch (error) {

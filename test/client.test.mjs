@@ -83,6 +83,8 @@ test("write mode refuses body fields that send, dun or fetch from another addres
     ["PATCH", "/accounts/x/addresses/v2/companies/u", { automatic_dunning: "1" }],
     ["POST", "/accounts/x/documents/v2/invoices/import", { documents: [{ documentUrl: "https://evil.example/x.pdf" }] }],
     ["POST", "/accounts/x/documents/v2/supplier-credit-notes", { documents: [{ documentUrl: "https://evil.example/x.pdf" }] }],
+    ["POST", "/accounts/x/documents/v2/invoices", { documents: [{ paymentInstructions: { iban: "CH9300762011623852957" } }] }],
+    ["PATCH", "/accounts/x/documents/v2/invoices/u", { documents: [{ paymentInstructions: { qrIban: "CH4431999123000889012" } }] }],
   ];
   for (const [method, path, body] of cases) {
     assert.match(checkAllowed("write", method, path, body), /full mode/, JSON.stringify(body));
@@ -95,6 +97,7 @@ test("write mode refuses body fields that send, dun or fetch from another addres
     assert.equal(checkAllowed("write", "POST", "/accounts/x/finances/v2/payments", { processing: { sendPaymentConfirmation: flag } }), null);
   }
   assert.equal(checkAllowed("write", "PATCH", "/accounts/x/addresses/v2/companies/u", { automatic_dunning: false }), null);
+  assert.equal(checkAllowed("write", "POST", "/accounts/x/documents/v2/invoices", { documents: [{ paymentInstructions: { bankAccountUuid: "b1" } }] }), null);
 });
 
 test("query names of changing calls must be plain, so data cannot be smuggled past the body checks", () => {
