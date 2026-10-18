@@ -2,39 +2,20 @@
 
 MCP-Server für [AbaNinja](https://www.abaninja.ch). Claude und andere KI-Assistenten greifen damit über die offizielle API auf ein AbaNinja-Konto zu. Inoffizielles Projekt.
 
-> Noch nicht veröffentlicht. Bis dahin Installation aus diesem Repository.
-
 ## Installation
 
-1. In AbaNinja ein API-Token erstellen ([Anleitung](https://docs.abaninja.ch/guide/authentication.html)). Ohne den Bereich `profile` zusätzlich `ABANINJA_ACCOUNT_UUID` setzen.
-2. [Node.js](https://nodejs.org) ab Version 22 installieren, dann:
-   ```bash
-   git clone https://github.com/ingeniumdesign/abaninja-mcp.git
-   cd abaninja-mcp
-   npm install
-   ```
-3. In Claude Desktop unter Einstellungen → Entwickler → Konfiguration bearbeiten eintragen, dann Claude neu starten:
-   ```json
-   {
-     "mcpServers": {
-       "abaninja": {
-         "command": "node",
-         "args": ["C:/Pfad/zu/abaninja-mcp/dist/index.js"],
-         "env": { "ABANINJA_API_TOKEN": "dein-token" }
-       }
-     }
-   }
-   ```
-
-Claude Code:
-
-```bash
-claude mcp add abaninja --scope user -e ABANINJA_API_TOKEN=dein-token -- node /Pfad/zu/abaninja-mcp/dist/index.js
-```
+1. In AbaNinja ein API-Token erstellen ([Anleitung](https://docs.abaninja.ch/guide/authentication.html)).
+2. Je nach Programm:
+   - **Claude Desktop:** [abaninja-mcp.mcpb](https://github.com/ingeniumdesign/abaninja-mcp/releases/latest/download/abaninja-mcp.mcpb) herunterladen, öffnen und das Token eintragen.
+   - **Claude Code** (braucht [Node.js](https://nodejs.org) ab 22):
+     ```bash
+     claude mcp add abaninja --scope user -e ABANINJA_API_TOKEN=dein-token -- npx -y abaninja-mcp
+     ```
+   - **Andere MCP-Clients:** Befehl `npx -y abaninja-mcp`, Token in `ABANINJA_API_TOKEN`.
 
 ## Modi
 
-`ABANINJA_MODE` legt fest, was erlaubt ist:
+Standard ist nur lesen. Mehr erlaubt `ABANINJA_MODE`, in Claude Desktop die Häkchen «Änderungen erlauben» und «Alles erlauben»:
 
 | Modus | Erlaubt |
 | --- | --- |
@@ -44,7 +25,7 @@ claude mcp add abaninja --scope user -e ABANINJA_API_TOKEN=dein-token -- node /P
 
 `write` schützt vor Versehen, nicht vor manipulierten Anweisungen in Daten oder Dokumenten. Sicher ist nur `read`.
 
-Hat das Token Zugriff auf mehrere Konten, wählt `ABANINJA_ACCOUNT_UUID` das Konto.
+Hat das Token Zugriff auf mehrere Konten oder fehlt ihm der Bereich `profile`, wählt `ABANINJA_ACCOUNT_UUID` das Konto.
 
 ## Tools
 
@@ -62,7 +43,10 @@ npm test                  # Tests ohne Netz
 npm run catalog           # Endpunkt-Katalog aus den OpenAPI-Specs neu erzeugen
 npm run live              # Live-Test gegen ein echtes Konto, nur lesend
 npm run live -- --write   # legt Testdaten an, ändert und löscht sie wieder
+npm run bundle            # Erweiterung für Claude Desktop bauen
 ```
+
+Release: [docs/release.md](docs/release.md)
 
 Eigenheiten der API: [docs/abaninja-api.md](docs/abaninja-api.md)
 

@@ -1,5 +1,5 @@
 // Offline tests for the API client: path checks, mode rules, accounts and errors. No network access.
-import { test } from "node:test";
+import { beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { AbaNinjaClient, checkAllowed, loadConfig } from "../dist/abaninja.js";
 
@@ -9,16 +9,16 @@ const json = (data, status = 200, headers = {}) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...headers } });
 
 const calls = [];
-let respond = () => json({ ok: true });
+let respond;
+beforeEach(() => {
+  calls.length = 0;
+  respond = () => json({ ok: true });
+});
 globalThis.fetch = async (url, init) => {
   calls.push({ url: String(url), method: init.method, body: init.body });
   return respond(String(url), init);
 };
 const client = (mode, accountUuid = ACCOUNT) => new AbaNinjaClient({ token: "test-token", accountUuid, mode });
-const reset = () => {
-  calls.length = 0;
-  respond = () => json({ ok: true });
-};
 
 test("paths that could leave api.abaninja.ch or dodge the mode check are rejected before any request", async () => {
   const bad = [
@@ -38,7 +38,6 @@ test("paths that could leave api.abaninja.ch or dodge the mode check are rejecte
     "accounts/{accountUuid}/documents/v2/invoices",
   ];
   for (const path of bad) {
-    reset();
     await assert.rejects(client("full").request("GET", path), /plain API path/, JSON.stringify(path));
     assert.equal(calls.length, 0, JSON.stringify(path));
   }
@@ -90,12 +89,9 @@ test("write mode refuses body fields that send, dun or fetch from another addres
     assert.match(checkAllowed("write", method, path, body), /full mode/, JSON.stringify(body));
     assert.equal(checkAllowed("full", method, path, body), null);
   }
-  for (const flag of [1, "1", "true", "on", "yes"]) {
-    assert.notEqual(checkAllowed("write", "POST", "/accounts/x/finances/v2/payments", { processing: { sendPaymentConfirmation: flag } }), null);
-  }
-  for (const flag of [false, 0, "0", "false"]) {
-    assert.equal(checkAllowed("write", "POST", "/accounts/x/finances/v2/payments", { processing: { sendPaymentConfirmation: flag } }), null);
-  }
+  const confirmation = (flag) => checkAllowed("write", "POST", "/accounts/x/finances/v2/payments", { processing: { sendPaymentConfirmation: flag } });
+  for (const flag of [1, "1", "true", "on", "yes"]) assert.notEqual(confirmation(flag), null, String(flag));
+  for (const flag of [false, 0, "0", "false"]) assert.equal(confirmation(flag), null, String(flag));
   assert.equal(checkAllowed("write", "PATCH", "/accounts/x/addresses/v2/companies/u", { automatic_dunning: false }), null);
   assert.equal(checkAllowed("write", "POST", "/accounts/x/documents/v2/invoices", { documents: [{ paymentInstructions: { bankAccountUuid: "b1" } }] }), null);
 });
@@ -127,10 +123,20 @@ test("configuration: tokens with control characters, unknown modes and malformed
   assert.equal(loadConfig({ ABANINJA_API_TOKEN: "abc" }).mode, "read");
   assert.throws(() => loadConfig({ ABANINJA_API_TOKEN: "abc", ABANINJA_MODE: "admin" }), /read, write or full/);
   assert.throws(() => loadConfig({ ABANINJA_API_TOKEN: "abc", ABANINJA_ACCOUNT_UUID: "my-account" }), /must be a uuid/);
+  // The switches of the Claude Desktop extension; ABANINJA_MODE wins when it is set.
+  assert.equal(loadConfig({ ABANINJA_API_TOKEN: "abc", ABANINJA_ALLOW_WRITE: "true", ABANINJA_ALLOW_ALL: "false" }).mode, "write");
+  assert.equal(loadConfig({ ABANINJA_API_TOKEN: "abc", ABANINJA_ALLOW_WRITE: "false", ABANINJA_ALLOW_ALL: "true" }).mode, "full");
+  assert.equal(loadConfig({ ABANINJA_API_TOKEN: "abc", ABANINJA_ALLOW_WRITE: "false", ABANINJA_ALLOW_ALL: "false" }).mode, "read");
+  assert.equal(loadConfig({ ABANINJA_API_TOKEN: "abc", ABANINJA_ALLOW_ALL: "true", ABANINJA_MODE: "read" }).mode, "read");
+});
+
+test("request() applies the mode check before anything is sent", async () => {
+  await assert.rejects(client("write").request("PATCH", "/accounts/{accountUuid}/documents/v2/invoices/u/actions/email", { body: {} }), /full mode/);
+  await assert.rejects(client("read").request("POST", "/accounts/{accountUuid}/addresses/v2/addresses", { body: {} }), /read mode/);
+  assert.equal(calls.length, 0);
 });
 
 test("requests go to api.abaninja.ch with the account filled in and lists sent as name[]", async () => {
-  reset();
   await client("read").request("GET", "/accounts/{accountUuid}/addresses/v2/companies", {
     query: { "tags[]": ["VIP", "A"], kind: ["x", "y"], limit: 5 },
   });
@@ -143,7 +149,6 @@ test("requests go to api.abaninja.ch with the account filled in and lists sent a
 });
 
 test("the server stays in its account, needs filled placeholders and a JSON body", async () => {
-  reset();
   await assert.rejects(client("read").request("GET", `/accounts/${OTHER_ACCOUNT}/addresses/v2/companies`), /Other accounts/);
   await assert.rejects(client("read").request("GET", "/accounts/{accountUuid}/documents/v2/invoices/{invoiceUuid}"), /Fill in \{invoiceUuid\}/);
   await assert.rejects(client("write").request("POST", "/accounts/{accountUuid}/addresses/v2/addresses", { body: "{\"type\":\"company\"}" }), /JSON object/);
@@ -153,7 +158,6 @@ test("the server stays in its account, needs filled placeholders and a JSON body
 });
 
 test("without a configured account the only account is used, several accounts are listed in the error", async () => {
-  reset();
   respond = (url) => (url.endsWith("/users/v2/me/accounts") ? json({ data: [{ uuid: ACCOUNT, name: "Muster AG" }] }) : json({ data: [] }));
   const single = client("read", "");
   await Promise.all([single.request("GET", "/accounts/{accountUuid}/addresses/v2/companies"), single.request("GET", "/accounts/{accountUuid}/addresses/v2/persons")]);
@@ -165,7 +169,6 @@ test("without a configured account the only account is used, several accounts ar
 });
 
 test("errors keep JSON details, reduce HTML pages to text and explain network failures", async () => {
-  reset();
   const details = { message: "Duplicate", duplicates: Array.from({ length: 20 }, (_, n) => ({ uuid: `d${n}`, name: `Muster ${n} AG` })) };
   respond = () => json(details, 409);
   await assert.rejects(client("write").request("POST", "/accounts/{accountUuid}/addresses/v2/addresses", { body: {} }), (error) =>
@@ -179,7 +182,6 @@ test("errors keep JSON details, reduce HTML pages to text and explain network fa
 });
 
 test("rate limits are retried, empty answers are reported as success", async () => {
-  reset();
   let attempts = 0;
   respond = () => (++attempts === 1 ? json({ message: "slow down" }, 429, { "retry-after": "0" }) : json({ data: [] }));
   assert.deepEqual(await client("read").request("GET", "/accounts/{accountUuid}/addresses/v2/companies"), { data: [] });
@@ -189,7 +191,6 @@ test("rate limits are retried, empty answers are reported as success", async () 
 });
 
 test("binary responses are described, not decoded", async () => {
-  reset();
   respond = () => new Response(new Uint8Array(1234), { status: 200, headers: { "content-type": "application/pdf" } });
   const result = await client("read").request("GET", "/accounts/{accountUuid}/documents/v2/invoices/u/files/f");
   assert.deepEqual(result, { contentType: "application/pdf", bytes: 1234, note: "Binary content is not shown." });

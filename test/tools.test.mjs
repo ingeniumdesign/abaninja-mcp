@@ -1,5 +1,5 @@
 // Offline tests for the MCP tools with made-up data. No network access.
-import { test } from "node:test";
+import { beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -7,6 +7,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AbaNinjaClient } from "../dist/abaninja.js";
 import { registerTools } from "../dist/tools.js";
 
+const ACCOUNT = "00000000-0000-4000-8000-000000000000";
 const day = (offset) => new Date(Date.now() + offset * 864e5).toLocaleDateString("sv-SE", { timeZone: "Europe/Zurich" });
 
 const sampleInvoices = [
@@ -18,7 +19,7 @@ const sampleInvoices = [
   { uuid: "i6", invoiceNumber: "RE-2026-006", status: "due", currencyCode: "CHF", openAmount: 30, receiver: { personUuid: "p1", name: "René Egger" } },
 ];
 const quotes = [
-  { uuid: "q1", quoteNumber: "O0182", title: "Website Relaunch", status: "sent", currencyCode: "CHF", documentTotal: 5000, receiver: { companyUuid: "c1", name: "Müller AG" } },
+  { uuid: "q1", quoteNumber: "O0182", title: "Website Relaunch, replaces O0183", status: "sent", currencyCode: "CHF", documentTotal: 5000, receiver: { companyUuid: "c1", name: "Müller AG" } },
   { uuid: "q2", quoteNumber: "O0183", title: "Hosting", status: "draft", currencyCode: "CHF", documentTotal: 240, receiver: { companyUuid: "c2", name: "Nullstelle GmbH" } },
 ];
 const companies = [
@@ -40,63 +41,56 @@ const companies = [
   {
     uuid: "c3",
     customer_number: "M0002",
-    company_name: "Seestrasse Immobilien M0001",
+    company_name: "Seestrasse Immobilien P0001",
     addresses: [{ uuid: "a3", address: "Seeweg", street_number: "2", zip_code: "6300", city: "Zug", country_code: "CH" }],
   },
+  {
+    uuid: "c4",
+    customer_number: "B0001",
+    company_name: "Bäckerei Mueller AG",
+    addresses: [{ uuid: "a4", address: "Hauptstrasse", street_number: "5", zip_code: "8001", city: "Zuerich", country_code: "CH" }],
+  },
 ];
-companies.push({
-  uuid: "c4",
-  customer_number: "B0001",
-  company_name: "Bäckerei Mueller AG",
-  addresses: [{ uuid: "a4", address: "Hauptstrasse", street_number: "5", zip_code: "8001", city: "Zuerich", country_code: "CH" }],
-});
+const persons = [{ uuid: "p1", customer_number: "P0001", first_name: "René", last_name: "Egger", addresses: [] }];
 const creditNotes = [{ uuid: "g1", creditNoteNumber: "G0001", creditNoteDate: "2026-09-30", status: "sent", currencyCode: "CHF", documentTotal: 50, receiver: { companyUuid: "c1", name: "Müller AG" } }];
 const receipts = [{ uuid: "b1", receiptNumber: "B-77", invoiceDate: "2026-09-01", currencyCode: "CHF", documentTotal: 89, receiver: { companyUuid: "s1", receiverInformation: { name: "Swisscom AG", customerNumber: "L0001" } } }];
-const padded = Array.from({ length: 450 }, (_, n) => ({ uuid: `n${n + 1}`, invoiceNumber: String(n + 1).padStart(8, "0"), status: "paid", currencyCode: "CHF", openAmount: 0 }));
-const persons = [{ uuid: "p1", customer_number: "P0001", first_name: "René", last_name: "Egger", addresses: [] }];
 
-let invoices = sampleInvoices;
+// Tests may replace the invoices; each test starts with the samples.
+let invoices;
+beforeEach(() => {
+  invoices = sampleInvoices;
+});
+
+// A fake API serving the lists above on page 1, in the shapes AbaNinja uses for addresses and documents.
 let addressLoads = 0;
 globalThis.fetch = async (input, init) => {
   const url = new URL(String(input));
-  const json = (data) => new Response(JSON.stringify(data), { status: 200, headers: { "content-type": "application/json" } });
-  const page = (list) => (url.searchParams.get("page") === "1" ? list : []);
+  const json = (data) => new Response(JSON.stringify(data), { headers: { "content-type": "application/json" } });
   if (init.method !== "GET") return json({ data: { uuid: "new" } });
-  if (url.pathname.endsWith("/documents/v2/invoices")) return json({ status: 200, message: "", data: { documents: page(invoices) } });
-  if (url.pathname.endsWith("/documents/v2/quotes")) return json({ status: 200, message: "", data: { documents: page(quotes) } });
-  if (url.pathname.endsWith("/documents/v2/credit-notes")) return json({ status: 200, message: "", data: { documents: page(creditNotes) } });
-  if (url.pathname.endsWith("/documents/v2/receipts")) return json({ status: 200, message: "", data: { documents: page(receipts) } });
-  if (url.pathname.endsWith("/addresses/v2/companies")) {
-    addressLoads++;
-    return json({ data: page(companies), meta: { total: companies.length } });
-  }
-  if (url.pathname.endsWith("/addresses/v2/persons")) return json({ data: page(persons), meta: { total: persons.length } });
-  return new Response("not found", { status: 404 });
+  const list = { companies, persons, invoices, quotes, "credit-notes": creditNotes, receipts }[url.pathname.split("/").pop()];
+  if (!list) return new Response("not found", { status: 404 });
+  if (list === companies) addressLoads++;
+  const page = url.searchParams.get("page") === "1" ? list : [];
+  return json(url.pathname.includes("/documents/") ? { data: { documents: page } } : { data: page });
 };
 
 async function connect(mode = "read") {
   const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerTools(server, new AbaNinjaClient({ token: "test-token", accountUuid: "00000000-0000-4000-8000-000000000000", mode }));
+  registerTools(server, new AbaNinjaClient({ token: "test-token", accountUuid: ACCOUNT, mode }));
   const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
   const client = new Client({ name: "test", version: "0.0.0" });
   await client.connect(clientSide);
+  // Successful answers must be valid JSON, so they are parsed here.
   const call = async (name, args) => {
     const result = await client.callTool({ name, arguments: args });
     const text = result.content[0].text;
-    let json;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      json = undefined;
-    }
-    return { isError: !!result.isError, text, json };
+    return { isError: !!result.isError, text, json: result.isError ? undefined : JSON.parse(text) };
   };
   return Object.assign(call, { listTools: () => client.listTools() });
 }
 
 test("open invoices are summed per currency and skip drafts, paid and cancelled ones", async () => {
-  invoices = sampleInvoices;
   const call = await connect();
   const all = await call("abaninja_open_invoices", {});
   assert.equal(all.json.total, 3);
@@ -135,25 +129,21 @@ test("long pages drop whole items and report the next offset", async () => {
   }));
   const call = await connect();
   const page = await call("abaninja_open_invoices", { limit: 200 });
-  assert.ok(page.json, "response is valid JSON");
   assert.ok(page.text.length <= 50_000);
   assert.equal(page.json.shortened, true);
   assert.equal(page.json.count, page.json.items.length);
   assert.equal(page.json.nextOffset, page.json.count);
   assert.deepEqual(page.json.totalOpenAmountByCurrency, { CHF: 300 });
-  invoices = sampleInvoices;
 });
 
 test("a long raw API list drops whole entries and stays valid JSON", async () => {
   invoices = Array.from({ length: 120 }, (_, n) => ({ uuid: `y${n}`, title: "Lorem ipsum dolor sit amet ".repeat(30), status: "due", currencyCode: "CHF", openAmount: 1 }));
   const call = await connect();
   const result = await call("abaninja_request", { method: "GET", path: "/accounts/{accountUuid}/documents/v2/invoices", query: { limit: 400, page: 1 } });
-  assert.ok(result.json, "response is valid JSON");
   assert.ok(result.text.length <= 50_000);
   assert.equal(result.json.shortened.entriesOnPage, 120);
   assert.equal(result.json.shortened.shown, result.json.data.documents.length);
   assert.ok(result.json.shortened.shown < 120);
-  invoices = sampleInvoices;
 });
 
 test("an empty raw list stays a list", async () => {
@@ -162,22 +152,31 @@ test("an empty raw list stays a list", async () => {
   assert.deepEqual(result.json.data.documents, []);
 });
 
-test("address search ignores accents, finds streets, numbers and phones in any format, exact customer numbers first", async () => {
+test("address search folds accents both ways, finds streets, numbers and phones in any format, exact customer numbers first", async () => {
   const call = await connect();
-  const total = async (query) => (await call("abaninja_search_addresses", { query })).json.total;
-  for (const query of ["Müller", "muller", "Mueller", "Zurich", "Zuerich", "Rene Egger", "René Egger", "seestrasse 17", "Müller AG, Zürich"]) {
-    assert.ok((await total(query)) >= 1, query);
+  const search = async (query) => (await call("abaninja_search_addresses", { query })).json.items.map((i) => i.uuid);
+  // c1 is stored as Müller AG in Zürich, c4 as Bäckerei Mueller AG in Zuerich.
+  for (const query of ["Müller", "Muller", "Mueller", "Zürich", "Zurich", "Zuerich"]) {
+    const uuids = await search(query);
+    assert.ok(uuids.includes("c1") && uuids.includes("c4"), query);
   }
-  assert.equal(await total("01234567"), 1);
-  assert.equal(await total("031 765 43 21"), 1);
-  assert.equal(await total("+41 (0)31 765 43 21"), 1);
-  assert.equal(await total("044 123 45 67"), 1);
-  assert.equal(await total("044 123 45 67 8000"), 1, "a postcode after the phone number is its own word");
-  assert.equal(await total("nobody"), 0);
-  assert.equal(await total("044 999 99 99"), 0);
-  const ranked = await call("abaninja_search_addresses", { query: "M0001" });
-  assert.deepEqual(ranked.json.items.map((i) => i.uuid), ["c1", "c3"]);
-  assert.equal(ranked.json.items[0].contactPersons[0].uuid, "cp1");
+  for (const query of ["Rene Egger", "René Egger", "seestrasse 17", "Müller AG, Zürich"]) {
+    assert.ok((await search(query)).length >= 1, query);
+  }
+  for (const [query, expected] of [
+    ["01234567", ["c2"]],
+    ["031 765 43 21", ["c2"]],
+    ["+41 (0)31 765 43 21", ["c2"]],
+    ["044 123 45 67", ["c1"]],
+    ["044 123 45 67 8000", ["c1"]], // a postcode after the phone number is its own word
+    ["nobody", []],
+    ["044 999 99 99", []],
+    ["M0001", ["c1"]],
+    ["P0001", ["p1", "c3"]], // the exact customer number first, although companies are listed before persons
+  ]) {
+    assert.deepEqual(await search(query), expected, query);
+  }
+  assert.equal((await call("abaninja_search_addresses", { query: "M0001" })).json.items[0].contactPersons[0].uuid, "cp1");
 });
 
 test("the address list is loaded again after a change made through the server", async () => {
@@ -191,15 +190,21 @@ test("the address list is loaded again after a change made through the server", 
   assert.equal(addressLoads, before + 2, "loaded again after the change");
 });
 
-test("documents can be found by number, text, customer and status", async () => {
+test("find_documents: by number (exact first), text, customer and status, with dates and customers for every type", async () => {
   const call = await connect();
-  const find = async (args) => (await call("abaninja_find_documents", args)).json;
-  assert.deepEqual((await find({ type: "quotes", query: "O0183" })).items.map((d) => d.uuid), ["q2"]);
-  assert.equal((await find({ type: "quotes", query: "O0183" })).items[0].number, "O0183");
-  assert.deepEqual((await find({ type: "quotes", query: "website" })).items.map((d) => d.uuid), ["q1"]);
-  assert.deepEqual((await find({ type: "quotes", customer_uuid: "c2" })).items.map((d) => d.uuid), ["q2"]);
-  assert.deepEqual((await find({ type: "invoices", query: "RE-2026-004" })).items.map((d) => d.uuid), ["i4"]);
-  assert.equal((await find({ type: "invoices", status: "paid" })).total, 1);
+  const find = async (args) => (await call("abaninja_find_documents", args)).json.items;
+  assert.deepEqual((await find({ type: "quotes", query: "O0183" })).map((d) => [d.uuid, d.number]), [["q2", "O0183"], ["q1", "O0182"]]);
+  assert.deepEqual((await find({ type: "quotes", query: "website" })).map((d) => d.uuid), ["q1"]);
+  assert.deepEqual((await find({ type: "quotes", customer_uuid: "c2" })).map((d) => d.uuid), ["q2"]);
+  assert.deepEqual((await find({ type: "invoices", query: "RE-2026-004" })).map((d) => d.uuid), ["i4"]);
+  assert.deepEqual((await find({ type: "invoices", status: "paid" })).map((d) => d.uuid), ["i4"]);
+  assert.equal((await find({ type: "credit-notes", query: "G0001" }))[0].date, "2026-09-30");
+  assert.equal((await find({ type: "receipts", query: "swisscom" }))[0].customer, "Swisscom AG");
+  assert.equal((await call("abaninja_find_documents", { type: "receipts", status: "paid" })).isError, true, "receipts have no status");
+  invoices = Array.from({ length: 450 }, (_, n) => ({ uuid: `n${n + 1}`, invoiceNumber: String(n + 1).padStart(8, "0"), status: "paid", currencyCode: "CHF", openAmount: 0 }));
+  const byNumber = await find({ type: "invoices", query: "00000042" });
+  assert.equal(byNumber[0].number, "00000042");
+  assert.ok(byNumber.length <= 2, "no phone-number spellings");
 });
 
 test("the request tool tells the assistant its mode and rejects paths that would leave api.abaninja.ch", async () => {
@@ -215,41 +220,13 @@ test("the request tool tells the assistant its mode and rejects paths that would
   assert.equal((await call("abaninja_request", { method: "POST", path: "/accounts/{accountUuid}/addresses/v2/addresses", body: "{}" })).isError, true);
 });
 
-test("describe_endpoint accepts placeholders or real values", async () => {
+test("describe_endpoint accepts placeholders or real values and prefers literal segments", async () => {
   const call = await connect();
-  const a = await call("abaninja_describe_endpoint", { method: "PATCH", path: "/accounts/{accountUuid}/addresses/v2/companies/{companyUuid}" });
-  const b = await call("abaninja_describe_endpoint", { method: "PATCH", path: "/accounts/00000000-0000-4000-8000-000000000000/addresses/v2/companies/c1" });
-  assert.equal(a.isError, false);
-  assert.equal(b.json.path, a.json.path);
-});
-
-test("umlauts work in both directions between search words and stored data", async () => {
-  const call = await connect();
-  for (const query of ["Müller", "Muller", "Mueller", "Zürich", "Zurich", "Zuerich"]) {
-    const uuids = (await call("abaninja_search_addresses", { query })).json.items.map((i) => i.uuid);
-    assert.ok(uuids.includes("c4"), `${query} finds the company stored as Mueller in Zuerich`);
-  }
-});
-
-test("describe_endpoint prefers literal segments over placeholders", async () => {
-  const call = await connect();
-  const account = "/accounts/00000000-0000-4000-8000-000000000000";
-  for (const literal of ["/documents/v2/invoices/settings/dunnings", "/documents/v2/invoices/bulk-actions"]) {
-    const result = await call("abaninja_describe_endpoint", { method: "GET", path: account + literal });
-    assert.equal(result.json.path, "/accounts/{accountUuid}" + literal);
-  }
-});
-
-test("find_documents: exact numbers first, dates and suppliers for every type, status only where it exists", async () => {
-  invoices = padded;
-  const call = await connect();
-  const byNumber = (await call("abaninja_find_documents", { type: "invoices", query: "00000042" })).json;
-  assert.equal(byNumber.items[0].number, "00000042");
-  assert.ok(byNumber.total <= 2, "no phone-number spellings");
-  invoices = sampleInvoices;
-  const credit = (await call("abaninja_find_documents", { type: "credit-notes", query: "G0001" })).json.items[0];
-  assert.equal(credit.date, "2026-09-30");
-  const receipt = (await call("abaninja_find_documents", { type: "receipts", query: "swisscom" })).json.items[0];
-  assert.equal(receipt.customer, "Swisscom AG");
-  assert.equal((await call("abaninja_find_documents", { type: "receipts", status: "paid" })).isError, true);
+  const describe = async (method, path) => (await call("abaninja_describe_endpoint", { method, path })).json.path;
+  const company = "/accounts/{accountUuid}/addresses/v2/companies/{companyUuid}";
+  assert.equal(await describe("PATCH", company), company);
+  assert.equal(await describe("PATCH", `/accounts/${ACCOUNT}/addresses/v2/companies/c1`), company);
+  // Both also match .../{invoiceUuid}/dunnings and .../contracts/{contractUuid}.
+  assert.equal(await describe("GET", `/accounts/${ACCOUNT}/documents/v2/invoices/settings/dunnings`), "/accounts/{accountUuid}/documents/v2/invoices/settings/dunnings");
+  assert.equal(await describe("GET", `/accounts/${ACCOUNT}/time/v2/employees/e1/contracts/last-contract`), "/accounts/{accountUuid}/time/v2/employees/{employeeUuid}/contracts/last-contract");
 });

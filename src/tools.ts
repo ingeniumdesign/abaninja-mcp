@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { AbaNinjaClient } from "./abaninja.js";
+import type { AbaNinjaClient, Query } from "./abaninja.js";
 
 // Registers the MCP tools:
 // - abaninja_list_endpoints     find endpoints by area or keyword (from catalog/)
@@ -10,16 +10,15 @@ import type { AbaNinjaClient } from "./abaninja.js";
 // - abaninja_search_addresses   search companies and persons (the API has no search)
 // - abaninja_find_documents     find invoices, quotes and other documents by number, text or customer
 // - abaninja_open_invoices      open invoices with totals per currency (the API has no customer filter)
+// A handler that throws needs no try/catch: the SDK returns the message as an isError result.
 
+// A catalog entry; params, body and note are passed through unchanged.
 interface Endpoint {
   area: string;
   method: string;
   path: string;
   summary: string;
   tag?: string;
-  params?: { name: string; in: string; type: string; required?: boolean; description?: string }[];
-  body?: { name: string; type: string; required?: boolean; requiredIf?: string; requiredUnless?: string; description?: string }[];
-  note?: string;
 }
 
 type Row = Record<string, any>;
@@ -48,20 +47,15 @@ function prune(value: unknown): unknown {
   return value === null || value === "" ? undefined : value;
 }
 
-function isPage(value: unknown): value is { offset: number; items: unknown[] } {
-  const page = value as { offset?: unknown; items?: unknown } | null;
-  return !!page && typeof page.offset === "number" && Array.isArray(page.items);
-}
+// A page of this server, as built by paged().
+const isPage = (value: any) => typeof value?.offset === "number" && Array.isArray(value.items);
 
 // The main list of a raw API answer: the answer itself, data, or data.documents.
-function listOf(value: any): unknown[] | undefined {
-  if (Array.isArray(value)) return value;
-  if (Array.isArray(value?.data)) return value.data;
-  if (Array.isArray(value?.data?.documents)) return value.data.documents;
-  return undefined;
-}
+const listOf = (value: any): unknown[] | undefined => [value, value?.data, value?.data?.documents].find(Array.isArray);
 
+// The answer with only the first items of its list. A page of this server keeps count and nextOffset exact.
 function withList(value: any, items: unknown[], entriesOnPage: number): unknown {
+  if (isPage(value)) return { ...value, count: items.length, nextOffset: value.offset + items.length, items, shortened: true };
   const shortened = {
     shown: items.length,
     entriesOnPage,
@@ -73,24 +67,14 @@ function withList(value: any, items: unknown[], entriesOnPage: number): unknown 
 }
 
 function reply(data: unknown) {
-  let value: any = prune(data) ?? null;
+  const value: any = prune(data) ?? null;
+  const list: unknown[] = (isPage(value) ? value.items : listOf(value)) ?? [];
   let text = JSON.stringify(value);
-  if (text.length > MAX_RESPONSE_CHARS && isPage(value)) {
-    // A page of this server drops whole items from the end, so count and nextOffset stay exact.
-    while (text.length > MAX_RESPONSE_CHARS && value.items.length > 1) {
-      const keep = Math.max(1, Math.floor((value.items.length * MAX_RESPONSE_CHARS) / text.length) - 1);
-      const items = value.items.slice(0, keep);
-      value = { ...value, count: items.length, nextOffset: value.offset + items.length, items, shortened: true };
-      text = JSON.stringify(value);
-    }
-  } else if (text.length > MAX_RESPONSE_CHARS && listOf(value)) {
-    // A raw API list drops whole entries from the end and says how many are shown.
-    const all = listOf(value) ?? [];
-    let keep = all.length;
-    while (text.length > MAX_RESPONSE_CHARS && keep > 1) {
-      keep = Math.max(1, Math.floor((keep * MAX_RESPONSE_CHARS) / text.length) - 1);
-      text = JSON.stringify(withList(value, all.slice(0, keep), all.length));
-    }
+  // A long list drops whole entries from the end, so the JSON stays valid.
+  let keep = list.length;
+  while (text.length > MAX_RESPONSE_CHARS && keep > 1) {
+    keep = Math.max(1, Math.floor((keep * MAX_RESPONSE_CHARS) / text.length) - 1);
+    text = JSON.stringify(withList(value, list.slice(0, keep), list.length));
   }
   if (text.length > MAX_RESPONSE_CHARS) {
     text =
@@ -100,46 +84,28 @@ function reply(data: unknown) {
   return { content: [{ type: "text" as const, text }] };
 }
 
-function fail(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return { isError: true, content: [{ type: "text" as const, text: message }] };
-}
-
-// Today's date in Switzerland as YYYY-MM-DD: AbaNinja due dates are Swiss calendar dates.
-function swissToday(): string {
-  return new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Zurich" });
-}
-
-// Fetches every page of a list endpoint until a page has fewer than PAGE_SIZE entries.
-// complete is false when MAX_PAGES were not enough.
-async function fetchAll(
-  client: AbaNinjaClient,
-  path: string,
-  query: Record<string, string | number | boolean>,
-  pick: (body: any) => unknown,
-): Promise<{ rows: Row[]; complete: boolean }> {
+// Fetches every page of a list endpoint until a page has fewer than PAGE_SIZE entries, at most MAX_PAGES.
+async function fetchAll(client: AbaNinjaClient, path: string, query: Query = {}): Promise<{ rows: Row[]; incomplete?: string }> {
   const rows: Row[] = [];
   for (let page = 1; page <= MAX_PAGES; page++) {
-    const batch = pick(await client.request("GET", path, { query: { ...query, limit: PAGE_SIZE, page } }));
-    if (!Array.isArray(batch)) throw new Error(`Unexpected answer from ${path}: no list found.`);
-    rows.push(...batch);
-    if (batch.length < PAGE_SIZE) return { rows, complete: true };
+    const batch = listOf(await client.request("GET", path, { query: { ...query, limit: PAGE_SIZE, page } }));
+    if (!batch) throw new Error(`Unexpected answer from ${path}: no list found.`);
+    rows.push(...(batch as Row[]));
+    if (batch.length < PAGE_SIZE) return { rows };
   }
-  return { rows, complete: false };
+  return { rows, incomplete: `Only the first ${MAX_PAGES * PAGE_SIZE} entries were loaded, so results and totals are incomplete.` };
 }
 
-const INCOMPLETE = `Only the first ${MAX_PAGES * PAGE_SIZE} entries were loaded, so results and totals are incomplete.`;
-
-function cached<T>(load: () => Promise<T>): { get: () => Promise<T>; clear: () => void } {
+// Keeps a loaded value for CACHE_MS; a failed load is not kept.
+function cached<T>(load: () => Promise<T>) {
   let entry: { at: number; value: Promise<T> } | undefined;
   return {
-    get() {
+    get(): Promise<T> {
       if (!entry || Date.now() - entry.at > CACHE_MS) {
         const value = load();
-        const current = { at: Date.now(), value };
-        entry = current;
+        entry = { at: Date.now(), value };
         value.catch(() => {
-          if (entry === current) entry = undefined;
+          if (entry?.value === value) entry = undefined;
         });
       }
       return entry.value;
@@ -183,26 +149,21 @@ function addressView(row: Row, kind: "company" | "person") {
 // Lower case without accents, ae/oe/ue read as a/o/u, so "Zürich", "Zurich" and "Zuerich" are the same word.
 // Query and data go through the same folding, so it works in both directions.
 const fold = (text: string) =>
-  text
-    .normalize("NFD")
-    .replace(/\p{M}/gu, "")
-    .toLowerCase()
-    .replace(/ß/g, "ss")
-    .replace(/ae/g, "a")
-    .replace(/oe/g, "o")
-    .replace(/ue/g, "u");
-const indexText = (parts: unknown[]) => fold(parts.filter((part) => part !== undefined && part !== null && part !== "").join(" "));
+  text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/ß/g, "ss").replace(/([aou])e/g, "$1");
+// join() writes undefined and null as empty strings.
+const indexText = (parts: unknown[]) => fold(parts.join(" "));
 
 // Phone numbers starting with +, 00 or 0, written with spaces, dots, dashes, slashes or brackets.
 const PHONE = /(?:\+|\b0)\d[\d\s()/.-]{5,}\d/g;
 
+// The digits of a phone number without the "(0)" of "+41 (0)44 …".
+const phoneDigits = (text: string) => text.replace(/\(\s*0\s*\)/g, "").replace(/\D/g, "");
+
 // A phone number as international digits: "+41 44 123 45 67", "+41 (0)44 123 45 67" and "044 123 45 67"
 // all give "41441234567".
 function phoneKey(text: string): string {
-  const digits = text.replace(/\(\s*0\s*\)/g, "").replace(/\D/g, "");
-  if (digits.startsWith("00")) return digits.slice(2);
-  if (digits.startsWith("0")) return `41${digits.slice(1)}`;
-  return digits;
+  const digits = phoneDigits(text);
+  return digits.startsWith("00") ? digits.slice(2) : digits.replace(/^0/, "41");
 }
 
 // A phone number has at most 13 digits; digit groups after that (e.g. a postcode) are separate words.
@@ -211,7 +172,7 @@ function splitPhone(candidate: string): [string, string] {
   let digits = 0;
   let count = 0;
   for (const group of groups) {
-    const length = group.replace(/\(\s*0\s*\)/g, "").replace(/\D/g, "").length;
+    const length = phoneDigits(group).length;
     if (count > 0 && digits + length > 13) break;
     digits += length;
     count++;
@@ -224,13 +185,14 @@ function splitPhone(candidate: string): [string, string] {
 // and phone key, so "01234567" still finds a customer number and "044 123 45 67" finds "+41 44 123 45 67".
 function queryTerms(query: string, phones = true): string[][] {
   const terms: string[][] = [];
-  const rest = phones
-    ? fold(query).replace(PHONE, (candidate) => {
-        const [phone, after] = splitPhone(candidate);
-        terms.push([phone, phone.replace(/\D/g, ""), phoneKey(phone)]);
-        return ` ${after} `;
-      })
-    : fold(query);
+  let rest = fold(query);
+  if (phones) {
+    rest = rest.replace(PHONE, (candidate) => {
+      const [phone, after] = splitPhone(candidate);
+      terms.push([phone, phone.replace(/\D/g, ""), phoneKey(phone)]);
+      return ` ${after} `;
+    });
+  }
   for (const word of rest.split(/[\s,;]+/)) {
     const clean = word.replace(/^[^\p{L}\p{N}@+]+|[^\p{L}\p{N}]+$/gu, "");
     if (clean) terms.push([clean]);
@@ -239,6 +201,11 @@ function queryTerms(query: string, phones = true): string[][] {
 }
 
 const matches = (terms: string[][], text: string) => terms.every((spellings) => spellings.some((s) => text.includes(s)));
+// Puts the hits whose number equals a search word first, keeping the order otherwise.
+function exactFirst<T>(hits: T[], terms: string[][], number: (hit: T) => unknown): void {
+  const rank = (hit: T) => (terms.some((spellings) => spellings.includes(fold(String(number(hit) ?? "")))) ? 0 : 1);
+  hits.sort((a, b) => rank(a) - rank(b));
+}
 
 function addressText(row: Row): string {
   const contacts: Row[] = [...(row.contacts ?? []), ...(row.contact_persons ?? []).flatMap((p: Row) => p.contacts ?? [])];
@@ -294,13 +261,10 @@ const placeholderCount = (path: string) => (path.match(/\{/g) ?? []).length;
 // The catalog entry for a path with placeholders or real values. A literal segment beats a placeholder,
 // so ".../invoices/settings/dunnings" is not taken for ".../invoices/{invoiceUuid}/dunnings".
 function findEndpoint(method: string, path: string): Endpoint | undefined {
-  const wanted = path.replace(/\/$/, "").replace(/^\/accounts\/[0-9a-f]{8}-[0-9a-f-]{27}(?=\/|$)/i, "/accounts/{accountUuid}");
-  return (
-    catalog.find((e) => e.method === method && e.path === wanted) ??
-    catalog
-      .filter((e) => e.method === method && templatePattern(e.path).test(wanted))
-      .sort((a, b) => placeholderCount(a.path) - placeholderCount(b.path))[0]
-  );
+  const wanted = path.replace(/\/$/, "");
+  return catalog
+    .filter((e) => e.method === method && templatePattern(e.path).test(wanted))
+    .sort((a, b) => placeholderCount(a.path) - placeholderCount(b.path))[0];
 }
 
 const methodSchema = z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]);
@@ -318,19 +282,18 @@ const MODE_TEXT = {
 export function registerTools(server: McpServer, client: AbaNinjaClient): void {
   const addresses = cached(async () => {
     const [companies, persons] = await Promise.all([
-      fetchAll(client, "/accounts/{accountUuid}/addresses/v2/companies", {}, (b) => b?.data),
-      fetchAll(client, "/accounts/{accountUuid}/addresses/v2/persons", {}, (b) => b?.data),
+      fetchAll(client, "/accounts/{accountUuid}/addresses/v2/companies"),
+      fetchAll(client, "/accounts/{accountUuid}/addresses/v2/persons"),
     ]);
     return {
-      complete: companies.complete && persons.complete,
+      incomplete: companies.incomplete ?? persons.incomplete,
       rows: [
         ...companies.rows.map((row) => ({ row, kind: "company" as const })),
         ...persons.rows.map((row) => ({ row, kind: "person" as const })),
       ],
     };
   });
-  const loadDocuments = (type: string) =>
-    fetchAll(client, `/accounts/{accountUuid}/documents/v2/${type}`, { is_template: false }, (b) => b?.data?.documents);
+  const loadDocuments = (type: string) => fetchAll(client, `/accounts/{accountUuid}/documents/v2/${type}`, { is_template: false });
 
   server.registerTool(
     "abaninja_list_endpoints",
@@ -350,18 +313,14 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ area, query, method, limit, offset }) => {
-      try {
-        const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
-        const hits = catalog.filter((e) => {
-          if (area && e.area !== area) return false;
-          if (method && e.method !== method) return false;
-          const text = `${e.method} ${e.path} ${e.summary} ${e.tag ?? ""}`.toLowerCase();
-          return words.every((word) => text.includes(word));
-        });
-        return reply(paged(hits.map((e) => ({ method: e.method, path: e.path, summary: e.summary })), offset, limit));
-      } catch (error) {
-        return fail(error);
-      }
+      const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+      const hits = catalog.filter((e) => {
+        if (area && e.area !== area) return false;
+        if (method && e.method !== method) return false;
+        const text = `${e.method} ${e.path} ${e.summary} ${e.tag ?? ""}`.toLowerCase();
+        return words.every((word) => text.includes(word));
+      });
+      return reply(paged(hits.map((e) => ({ method: e.method, path: e.path, summary: e.summary })), offset, limit));
     },
   );
 
@@ -380,15 +339,9 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ method, path }) => {
-      try {
-        const hit = findEndpoint(method, path);
-        if (!hit) {
-          throw new Error(`No ${method} ${path} in the catalog. Use abaninja_list_endpoints to find the path.`);
-        }
-        return reply(hit);
-      } catch (error) {
-        return fail(error);
-      }
+      const hit = findEndpoint(method, path);
+      if (!hit) throw new Error(`No ${method} ${path} in the catalog. Use abaninja_list_endpoints to find the path.`);
+      return reply(hit);
     },
   );
 
@@ -416,22 +369,13 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
             .describe("JSON request body as an object or list"),
         })
         .strict(),
-      annotations: {
-        readOnlyHint: !changes,
-        destructiveHint: changes,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
+      annotations: { readOnlyHint: !changes, destructiveHint: changes, idempotentHint: false, openWorldHint: true },
     },
     async ({ method, path, query, body }) => {
-      try {
-        const result = await client.request(method, path, { query, body });
-        // A change can affect addresses, so the next search loads them fresh.
-        if (method !== "GET") addresses.clear();
-        return reply(result);
-      } catch (error) {
-        return fail(error);
-      }
+      const result = await client.request(method, path, { query, body });
+      // A change can affect addresses, so the next search loads them fresh.
+      if (method !== "GET") addresses.clear();
+      return reply(result);
     },
   );
 
@@ -454,26 +398,17 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
       annotations: READ_ONLY,
     },
     async ({ query, kind, tag, include_archived, limit, offset }) => {
-      try {
-        const terms = queryTerms(query ?? "");
-        const { rows, complete } = await addresses.get();
-        const hits = rows.filter(({ row, kind: rowKind }) => {
-          if (kind !== "all" && rowKind !== kind) return false;
-          if (!include_archived && row.isArchived) return false;
-          if (tag && !(row.tags ?? []).some((t: string) => fold(t) === fold(tag))) return false;
-          return matches(terms, addressText(row));
-        });
-        const exact = (row: Row) => (terms.some((spellings) => spellings.includes(fold(String(row.customer_number ?? "")))) ? 0 : 1);
-        hits.sort((a, b) => exact(a.row) - exact(b.row));
-        const result = paged(hits, offset, limit);
-        return reply({
-          ...(complete ? {} : { incomplete: INCOMPLETE }),
-          ...result,
-          items: result.items.map(({ row, kind: rowKind }) => addressView(row, rowKind)),
-        });
-      } catch (error) {
-        return fail(error);
-      }
+      const terms = queryTerms(query ?? "");
+      const { rows, incomplete } = await addresses.get();
+      const hits = rows.filter(({ row, kind: rowKind }) => {
+        if (kind !== "all" && rowKind !== kind) return false;
+        if (!include_archived && row.isArchived) return false;
+        if (tag && !(row.tags ?? []).some((t: string) => fold(t) === fold(tag))) return false;
+        return matches(terms, addressText(row));
+      });
+      exactFirst(hits, terms, (hit) => hit.row.customer_number);
+      const result = paged(hits, offset, limit);
+      return reply({ incomplete, ...result, items: result.items.map(({ row, kind: rowKind }) => addressView(row, rowKind)) });
     },
   );
 
@@ -496,27 +431,21 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
       annotations: READ_ONLY,
     },
     async ({ type, query, customer_uuid, status, limit, offset }) => {
-      try {
-        // Document numbers are no phone numbers: "00000042" must not also find "00000420".
-        const terms = queryTerms(query ?? "", false);
-        const { rows, complete } = await loadDocuments(type);
-        if (status && rows.length && rows.every((doc) => doc.status === undefined)) {
-          throw new Error(`Documents of type ${type} have no status. Leave out status.`);
-        }
-        const hits = rows.filter((doc) => {
-          if (customer_uuid && !isCustomer(doc, customer_uuid)) return false;
-          if (status && String(doc.status).toLowerCase() !== status.toLowerCase()) return false;
-          const numbers = Object.keys(doc).filter((k) => /Number$/.test(k)).map((k) => doc[k]);
-          return matches(terms, indexText([...numbers, doc.title, doc.reference, receiverName(doc), receiverNumber(doc), doc.status]));
-        });
-        // A document whose number equals a search word comes first.
-        const exact = (doc: Row) => (terms.some((spellings) => spellings.includes(fold(documentNumber(doc) ?? "\0"))) ? 0 : 1);
-        hits.sort((a, b) => exact(a) - exact(b));
-        const result = paged(hits, offset, limit);
-        return reply({ ...(complete ? {} : { incomplete: INCOMPLETE }), ...result, items: result.items.map(documentView) });
-      } catch (error) {
-        return fail(error);
+      // Document numbers are no phone numbers: "00000042" must not also find "00000420".
+      const terms = queryTerms(query ?? "", false);
+      const { rows, incomplete } = await loadDocuments(type);
+      if (status && rows.length && rows.every((doc) => doc.status === undefined)) {
+        throw new Error(`Documents of type ${type} have no status. Leave out status.`);
       }
+      const hits = rows.filter((doc) => {
+        if (customer_uuid && !isCustomer(doc, customer_uuid)) return false;
+        if (status && String(doc.status).toLowerCase() !== status.toLowerCase()) return false;
+        const numbers = Object.keys(doc).filter((k) => /Number$/.test(k)).map((k) => doc[k]);
+        return matches(terms, indexText([...numbers, doc.title, doc.reference, receiverName(doc), receiverNumber(doc), doc.status]));
+      });
+      exactFirst(hits, terms, documentNumber);
+      const result = paged(hits, offset, limit);
+      return reply({ incomplete, ...result, items: result.items.map(documentView) });
     },
   );
 
@@ -538,44 +467,36 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
       annotations: READ_ONLY,
     },
     async ({ customer_uuid, overdue_only, include_drafts, limit, offset }) => {
-      try {
-        const { rows, complete } = await loadDocuments("invoices");
-        const today = swissToday();
-        const isOverdue = (i: Row) => !!i.dueDate && String(i.dueDate).slice(0, 10) < today;
-        const open = rows
-          .filter((i) => Number(i.openAmount) > 0 && !i.isCancelled && !i.isTemplate)
-          .filter((i) => include_drafts || i.status !== "draft")
-          .filter((i) => !customer_uuid || isCustomer(i, customer_uuid))
-          .filter((i) => !overdue_only || isOverdue(i))
-          // Undated invoices go last.
-          .sort((a, b) => String(a.dueDate ?? "9999").localeCompare(String(b.dueDate ?? "9999")));
-        // Amounts are summed per currency: CHF and EUR must never be added up.
-        const totals: Record<string, number> = {};
-        for (const i of open) {
-          const currency = i.currencyCode ?? "unknown";
-          totals[currency] = (totals[currency] ?? 0) + Number(i.openAmount);
-        }
-        for (const currency of Object.keys(totals)) {
-          totals[currency] = Math.round(totals[currency] * 100) / 100;
-        }
-        const result = paged(open, offset, limit);
-        return reply({
-          ...(complete ? {} : { incomplete: INCOMPLETE }),
-          total: result.total,
-          totalOpenAmountByCurrency: totals,
-          offset: result.offset,
-          count: result.count,
-          nextOffset: result.nextOffset,
-          items: result.items.map((i) => ({
-            ...documentView(i),
-            overdue: i.dueDate ? isOverdue(i) : undefined,
-            dunningLevel: i.dunningLevel,
-            nextDunningDate: i.nextDunningDate,
-          })),
-        });
-      } catch (error) {
-        return fail(error);
+      const { rows, incomplete } = await loadDocuments("invoices");
+      // Due dates are Swiss calendar dates; sv-SE writes them as YYYY-MM-DD.
+      const today = new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Zurich" });
+      const isOverdue = (i: Row) => !!i.dueDate && String(i.dueDate).slice(0, 10) < today;
+      const open = rows
+        .filter((i) => Number(i.openAmount) > 0 && !i.isCancelled && !i.isTemplate)
+        .filter((i) => include_drafts || i.status !== "draft")
+        .filter((i) => !customer_uuid || isCustomer(i, customer_uuid))
+        .filter((i) => !overdue_only || isOverdue(i))
+        // Undated invoices go last.
+        .sort((a, b) => String(a.dueDate ?? "9999").localeCompare(String(b.dueDate ?? "9999")));
+      // Amounts are summed per currency (CHF and EUR must never be added up), then rounded to cents.
+      const totals: Record<string, number> = {};
+      for (const i of open) {
+        const currency = i.currencyCode ?? "unknown";
+        totals[currency] = (totals[currency] ?? 0) + Number(i.openAmount);
       }
+      for (const currency in totals) totals[currency] = Math.round(totals[currency] * 100) / 100;
+      const result = paged(open, offset, limit);
+      return reply({
+        incomplete,
+        totalOpenAmountByCurrency: totals,
+        ...result,
+        items: result.items.map((i) => ({
+          ...documentView(i),
+          overdue: i.dueDate ? isOverdue(i) : undefined,
+          dunningLevel: i.dunningLevel,
+          nextDunningDate: i.nextDunningDate,
+        })),
+      });
     },
   );
 }

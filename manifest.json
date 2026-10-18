@@ -1,0 +1,108 @@
+{
+  "manifest_version": "0.3",
+  "name": "abaninja-mcp",
+  "display_name": "AbaNinja",
+  "version": "0.1.0",
+  "description": "Kunden, Rechnungen, Offerten und mehr aus AbaNinja, über die offizielle API. Inoffiziell.",
+  "author": {
+    "name": "INGENIUMDESIGN",
+    "url": "https://github.com/ingeniumdesign"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ingeniumdesign/abaninja-mcp"
+  },
+  "homepage": "https://github.com/ingeniumdesign/abaninja-mcp",
+  "support": "https://github.com/ingeniumdesign/abaninja-mcp/issues",
+  "icon": "icon.png",
+  "license": "MIT",
+  "keywords": [
+    "abaninja",
+    "rechnungen",
+    "offerten",
+    "buchhaltung",
+    "schweiz"
+  ],
+  "privacy_policies": [
+    "https://help.abaninja.ch/en/general/data-protection.html"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/dist/index.js"
+      ],
+      "env": {
+        "ABANINJA_API_TOKEN": "${user_config.api_token}",
+        "ABANINJA_ACCOUNT_UUID": "${user_config.account_uuid}",
+        "ABANINJA_ALLOW_WRITE": "${user_config.allow_write}",
+        "ABANINJA_ALLOW_ALL": "${user_config.allow_all}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "abaninja_search_addresses",
+      "description": "Kunden und Lieferanten suchen"
+    },
+    {
+      "name": "abaninja_find_documents",
+      "description": "Rechnungen, Offerten, Gutschriften usw. finden"
+    },
+    {
+      "name": "abaninja_open_invoices",
+      "description": "Offene Rechnungen mit Summen pro Währung"
+    },
+    {
+      "name": "abaninja_list_endpoints",
+      "description": "API-Endpunkte finden"
+    },
+    {
+      "name": "abaninja_describe_endpoint",
+      "description": "Felder eines API-Endpunkts anzeigen"
+    },
+    {
+      "name": "abaninja_request",
+      "description": "Einen API-Endpunkt aufrufen"
+    }
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "user_config": {
+    "api_token": {
+      "type": "string",
+      "title": "API-Token",
+      "description": "In AbaNinja erstellen, Anleitung: docs.abaninja.ch/guide/authentication.html",
+      "sensitive": true,
+      "required": true
+    },
+    "account_uuid": {
+      "type": "string",
+      "title": "Konto-UUID",
+      "description": "Nur nötig, wenn das Token Zugriff auf mehrere Konten hat oder den Bereich profile nicht hat.",
+      "required": false,
+      "default": ""
+    },
+    "allow_write": {
+      "type": "boolean",
+      "title": "Änderungen erlauben",
+      "description": "Anlegen und Ändern. Löschen, Versenden und Mahnen bleiben gesperrt.",
+      "default": false
+    },
+    "allow_all": {
+      "type": "boolean",
+      "title": "Alles erlauben",
+      "description": "Auch Löschen, Versenden und Mahnen. Nur bewusst einschalten.",
+      "default": false
+    }
+  }
+}

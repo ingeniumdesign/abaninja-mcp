@@ -10,21 +10,21 @@ export interface Config {
   mode: Mode;
 }
 
-export type QueryValue = string | number | boolean | (string | number)[];
-export type Query = Record<string, QueryValue>;
+export type Query = Record<string, string | number | boolean | (string | number)[]>;
+type RequestOptions = { query?: Query; body?: unknown };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const token = env.ABANINJA_API_TOKEN?.trim();
-  if (!token) {
-    throw new Error("ABANINJA_API_TOKEN is not set.");
-  }
+  if (!token) throw new Error("ABANINJA_API_TOKEN is not set.");
   // A line break or control character would end up in error messages together with the token.
   if (!/^[\x21-\x7e]+$/.test(token)) {
     throw new Error("ABANINJA_API_TOKEN contains spaces, line breaks or other invalid characters.");
   }
-  const mode = env.ABANINJA_MODE?.trim() || "read";
+  // The Claude Desktop extension sets two switches instead of ABANINJA_MODE.
+  const switches = env.ABANINJA_ALLOW_ALL === "true" ? "full" : env.ABANINJA_ALLOW_WRITE === "true" ? "write" : "read";
+  const mode = env.ABANINJA_MODE?.trim() || switches;
   if (mode !== "read" && mode !== "write" && mode !== "full") {
     throw new Error(`ABANINJA_MODE must be read, write or full, got "${mode}".`);
   }
@@ -51,14 +51,14 @@ const BLOCKED_PATHS: { pattern: RegExp; reason: string }[] = [
   { pattern: /\/finances\/v2\/bank-accounts(\/|$)/i, reason: "changes bank details" },
 ];
 
-// Body fields that "write" mode refuses when they are set, wherever they appear in the body.
-const BLOCKED_FIELDS: { field: string; reason: string }[] = [
-  { field: "sendPaymentConfirmation", reason: "e-mails a payment confirmation to the customer" },
-  { field: "automatic_dunning", reason: "switches on automatic dunning" },
-  { field: "documentUrl", reason: "makes AbaNinja download a file from another address" },
-  { field: "iban", reason: "sets the bank account customers pay to" },
-  { field: "qrIban", reason: "sets the bank account customers pay to" },
-];
+// Fields that "write" mode refuses when they are set, wherever they appear in the body or query.
+const BLOCKED_FIELDS: Record<string, string> = {
+  sendPaymentConfirmation: "e-mails a payment confirmation to the customer",
+  automatic_dunning: "switches on automatic dunning",
+  documentUrl: "makes AbaNinja download a file from another address",
+  iban: "sets the bank account customers pay to",
+  qrIban: "sets the bank account customers pay to",
+};
 
 const PAYMENTS = /\/finances\/v2\/payments(\/[^/]+)?$/i;
 
@@ -69,59 +69,43 @@ function phpKey(key: string): string {
 }
 
 // A value counts as set unless it is missing or clearly false.
-const isSet = (value: unknown) => value !== undefined && value !== null && ![false, 0, "0", "false", ""].includes(value as never);
+const isSet = (value: unknown) => value != null && ![false, 0, "0", "false", ""].includes(value as never);
 
-// The first blocked body field that is set, looking through nested objects and lists.
-function blockedField(body: unknown): string | undefined {
-  if (Array.isArray(body)) {
-    for (const item of body) {
-      const found = blockedField(item);
-      if (found) return found;
-    }
-  } else if (body && typeof body === "object") {
-    for (const [key, value] of Object.entries(body)) {
-      const rule = BLOCKED_FIELDS.find((r) => r.field.toLowerCase() === key.toLowerCase());
-      if (rule && isSet(value)) return `${rule.field} ${rule.reason}`;
-      const found = blockedField(value);
-      if (found) return found;
-    }
+// The first blocked field that is set, looking through nested objects and lists.
+function blockedField(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  for (const [key, item] of Object.entries(value)) {
+    const field = Object.keys(BLOCKED_FIELDS).find((name) => name.toLowerCase() === key.toLowerCase());
+    if (field && isSet(item)) return `${field} ${BLOCKED_FIELDS[field]}`;
+    const found = blockedField(item);
+    if (found) return found;
   }
-  return undefined;
 }
 
 // Returns why a call is not allowed in the given mode, or null when it is allowed.
-export function checkAllowed(mode: Mode, method: string, path: string, body?: unknown, query?: Query): string | null {
-  const verb = method.toUpperCase();
+export function checkAllowed(mode: Mode, method: string, path: string, body?: unknown, query: Query = {}): string | null {
   if (mode === "full") return null;
-  const keys = Object.keys(query ?? {});
+  const verb = method.toUpperCase();
+  const keys = Object.keys(query);
   if (keys.some((key) => /[\x00-\x1f\x7f]/.test(key))) {
     return "Query parameter names must not contain control characters.";
   }
   // The backend honours a method override ("_method=DELETE" on a POST), which would turn an allowed
   // POST into a blocked DELETE.
-  const bodyKeys = body && typeof body === "object" && !Array.isArray(body) ? Object.keys(body) : [];
-  if ([...keys, ...bodyKeys].some((key) => /^_*method$/i.test(phpKey(key)))) {
+  if ([...keys, ...Object.keys(body ?? {})].some((key) => /^_*method$/i.test(phpKey(key)))) {
     return "A _method parameter would change the HTTP method. It is only allowed in full mode.";
   }
   if (verb === "GET") return null;
-  if (mode === "read") {
-    return `${verb} is not allowed in read mode. Set ABANINJA_MODE=write to allow changes.`;
-  }
-  if (!["POST", "PATCH", "PUT"].includes(verb)) {
-    return `${verb} is only allowed in full mode.`;
-  }
+  if (mode === "read") return `${verb} is not allowed in read mode. Set ABANINJA_MODE=write to allow changes.`;
+  if (!["POST", "PATCH", "PUT"].includes(verb)) return `${verb} is only allowed in full mode.`;
   const blockedPath = BLOCKED_PATHS.find((rule) => rule.pattern.test(path));
-  if (blockedPath) {
-    return `This call ${blockedPath.reason}. It is only allowed in full mode.`;
-  }
+  if (blockedPath) return `This call ${blockedPath.reason}. It is only allowed in full mode.`;
   // Data of a changing call belongs in the body; the backend would also read nested query names.
   if (keys.some((key) => !/^[A-Za-z0-9_-]+$/.test(key))) {
     return "Query parameter names of changing calls must be plain names. Put data into the body.";
   }
-  const field = blockedField(body) ?? blockedField(Object.fromEntries(keys.map((key) => [key, query?.[key]])));
-  if (field) {
-    return `${field}. It is only allowed in full mode.`;
-  }
+  const field = blockedField(body) ?? blockedField(query);
+  if (field) return `${field}. It is only allowed in full mode.`;
   if (PAYMENTS.test(path) && keys.some((key) => key.toLowerCase().startsWith("processing"))) {
     return "Payment processing data belongs in the body.";
   }
@@ -183,38 +167,33 @@ export class AbaNinjaClient {
   }
 
   // Calls an endpoint within the configured mode and account. "{accountUuid}" is filled in automatically.
-  async request(method: string, path: string, options: { query?: Query; body?: unknown } = {}): Promise<unknown> {
+  async request(method: string, path: string, options: RequestOptions = {}): Promise<unknown> {
     if (!PATH_PATTERN.test(path)) {
       throw new Error("path must be a plain API path like /accounts/{accountUuid}/documents/v2/invoices. Put query parameters into query.");
     }
-    if (typeof options.body === "string") {
-      throw new Error("body must be a JSON object or list, not a string.");
-    }
+    if (typeof options.body === "string") throw new Error("body must be a JSON object or list, not a string.");
     const blocked = checkAllowed(this.config.mode, method, path, options.body, options.query);
     if (blocked) throw new Error(blocked);
-    let resolved = path;
-    const accountsInPath = [...path.matchAll(/\/accounts\/([0-9a-f]{8}-[0-9a-f-]{27})/gi)].map((match) => match[1]);
+    const accountsInPath = [...path.matchAll(/\/accounts\/([0-9a-f]{8}-[0-9a-f-]{27})/gi)].map((match) => match[1].toLowerCase());
     if (path.includes("{accountUuid}") || accountsInPath.length) {
       const account = await this.getAccountUuid();
-      resolved = path.replaceAll("{accountUuid}", account);
       // The server works for one account only, even if the token can reach more.
-      if (accountsInPath.some((uuid) => uuid.toLowerCase() !== account.toLowerCase())) {
+      if (accountsInPath.some((uuid) => uuid !== account.toLowerCase())) {
         throw new Error(`This server is set up for account ${account}. Other accounts are not allowed.`);
       }
+      path = path.replaceAll("{accountUuid}", account);
     }
-    const placeholder = resolved.match(/\{[^}]*\}/)?.[0];
+    const placeholder = path.match(/\{[^}]*\}/)?.[0];
     if (placeholder) {
       throw new Error(`Fill in ${placeholder} with a real value. abaninja_describe_endpoint lists what each placeholder means.`);
     }
-    return this.send(method, resolved, options);
+    return this.send(method, path, options);
   }
 
-  private async send(method: string, path: string, options: { query?: Query; body?: unknown } = {}): Promise<unknown> {
+  private async send(method: string, path: string, { query = {}, body }: RequestOptions = {}): Promise<unknown> {
     const url = new URL(path, API_BASE);
-    if (url.origin !== API_BASE) {
-      throw new Error("Requests may only go to api.abaninja.ch.");
-    }
-    for (const [key, value] of Object.entries(options.query ?? {})) {
+    if (url.origin !== API_BASE) throw new Error("Requests may only go to api.abaninja.ch.");
+    for (const [key, value] of Object.entries(query)) {
       if (Array.isArray(value)) {
         // The backend reads repeated values as a list only with "[]" after the name.
         for (const item of value) url.searchParams.append(key.endsWith("[]") ? key : `${key}[]`, String(item));
@@ -223,7 +202,7 @@ export class AbaNinjaClient {
       }
     }
     const verb = method.toUpperCase();
-    const hasBody = options.body !== undefined;
+    const hasBody = body !== undefined;
     const init: RequestInit = {
       method: verb,
       headers: {
@@ -231,7 +210,7 @@ export class AbaNinjaClient {
         Accept: "application/json",
         ...(hasBody ? { "Content-Type": "application/json" } : {}),
       },
-      body: hasBody ? JSON.stringify(options.body) : undefined,
+      body: hasBody ? JSON.stringify(body) : undefined,
     };
 
     let response: Response;

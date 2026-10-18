@@ -1,6 +1,7 @@
 # Dependencies and build output
 node_modules/
 dist/
+*.mcpb
 
 # Secrets and local client configuration (may contain API tokens)
 .env

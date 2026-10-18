@@ -1,0 +1,24 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ingeniumdesign/abaninja-mcp",
+  "title": "AbaNinja",
+  "description": "Unofficial MCP server for the AbaNinja invoicing API (Switzerland).",
+  "repository": {
+    "url": "https://github.com/ingeniumdesign/abaninja-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "abaninja-mcp",
+      "version": "0.1.0",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        { "name": "ABANINJA_API_TOKEN", "description": "API token from AbaNinja", "isRequired": true, "isSecret": true },
+        { "name": "ABANINJA_MODE", "description": "read (default), write or full" },
+        { "name": "ABANINJA_ACCOUNT_UUID", "description": "Account, if the token can access several" }
+      ]
+    }
+  ]
+}

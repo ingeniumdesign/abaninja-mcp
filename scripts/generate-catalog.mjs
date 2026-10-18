@@ -1,6 +1,6 @@
 // Builds catalog/endpoints.json from the official AbaNinja OpenAPI specs.
-// Usage: node scripts/generate-catalog.mjs   (the functions are exported for the offline tests)
-import { mkdir, writeFile } from "node:fs/promises";
+// Usage: node scripts/generate-catalog.mjs   (endpointsOf and typeOf are exported for the offline tests)
+import { writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const SPEC_BASE = "https://docs.abaninja.ch/specs";
@@ -9,21 +9,17 @@ const AREAS = [
   "holidays", "products", "time-tracking", "units", "warehouse", "webhooks",
 ];
 const METHODS = ["get", "post", "put", "patch", "delete"];
-const MAX_DEPTH = 8;
 const OUTPUT = new URL("../catalog/endpoints.json", import.meta.url);
 
 // Replaces local "$ref" pointers (#/components/...) with the schema they point to.
 // A reference that points back into itself is cut off as {} to stop endless recursion.
-export function inlineRefs(node, spec, stack = []) {
+function inlineRefs(node, spec, stack = []) {
   if (Array.isArray(node)) return node.map((item) => inlineRefs(item, spec, stack));
   if (!node || typeof node !== "object") return node;
-  if (typeof node.$ref === "string" && node.$ref.startsWith("#/")) {
-    const { $ref, ...rest } = node;
+  const { $ref, ...rest } = node;
+  if (typeof $ref === "string" && $ref.startsWith("#/")) {
     if (stack.includes($ref)) return {};
-    const target = $ref
-      .slice(2)
-      .split("/")
-      .reduce((obj, key) => obj?.[key.replace(/~1/g, "/").replace(/~0/g, "~")], spec);
+    const target = $ref.slice(2).split("/").reduce((obj, key) => obj?.[key], spec);
     return { ...inlineRefs(target ?? {}, spec, [...stack, $ref]), ...inlineRefs(rest, spec, stack) };
   }
   return Object.fromEntries(Object.entries(node).map(([key, value]) => [key, inlineRefs(value, spec, stack)]));
@@ -31,72 +27,47 @@ export function inlineRefs(node, spec, stack = []) {
 
 const isObject = (schema) => !!schema && typeof schema === "object" && !Array.isArray(schema);
 const isEmpty = (schema) => isObject(schema) && Object.keys(schema).length === 0;
-const isNull = (schema) =>
-  isObject(schema) && (schema.type === "null" || (Array.isArray(schema.type) && schema.type.every((t) => t === "null")));
-const isArray = (schema) =>
-  isObject(schema) &&
-  (schema.type === "array" ||
-    (Array.isArray(schema.type) && schema.type.includes("array")) ||
-    (!schema.type && "items" in schema));
+const isNull = (schema) => isObject(schema) && schema.type !== undefined && [schema.type].flat().every((t) => t === "null");
+const isArray = (schema) => isObject(schema) && ([schema.type].flat().includes("array") || (!schema.type && "items" in schema));
 const isMap = (schema) => isObject(schema) && isObject(schema.additionalProperties) && !schema.properties;
 const isRich = (schema) =>
   ["properties", "items", "oneOf", "anyOf", "allOf", "enum", "const", "additionalProperties"].some((key) => key in schema);
-const variantsOf = (schema) => (schema.anyOf ?? schema.oneOf ?? []).filter((v) => isObject(v) && !isNull(v));
 
 // The item schema of a list, also when the list is written as variants that are all lists.
 function itemsOf(schema) {
-  if (!isObject(schema)) return undefined;
   if (isArray(schema)) return schema.items ?? {};
-  const variants = variantsOf(schema);
+  const variants = (schema.anyOf ?? schema.oneOf ?? []).filter((v) => !isNull(v));
   if (!variants.length || !variants.every(isArray)) return undefined;
-  const withItems = variants.filter((v) => isObject(v.items) && !isEmpty(v.items));
-  const lists = withItems.length ? withItems : variants;
-  return lists.length === 1 ? lists[0].items ?? {} : { anyOf: lists.map((v) => v.items ?? {}) };
+  const items = variants.map((v) => v.items).filter((item) => isObject(item) && !isEmpty(item));
+  return items.length > 1 ? { anyOf: items } : items[0] ?? {};
 }
 
-// Splits "a|enum(x|y)|b" into ["a", "enum(x|y)", "b"]: only "|" outside parentheses or <> separates types.
-function splitTypes(type) {
-  const parts = [];
-  let depth = 0;
-  let current = "";
-  for (const char of type) {
-    if (char === "(" || char === "<") depth++;
-    if (char === ")" || char === ">") depth--;
-    if (char === "|" && depth === 0) {
-      parts.push(current);
-      current = "";
-    } else {
-      current += char;
-    }
-  }
-  return [...parts, current];
-}
-
-export function typeOf(schema) {
-  if (schema === false) return "forbidden";
-  if (!isObject(schema)) return "any";
-  if ("const" in schema) return JSON.stringify(schema.const);
+// The possible types of a schema, e.g. ["string(uuid)", "integer"].
+function typesOf(schema) {
+  if (!isObject(schema)) return ["any"];
+  if ("const" in schema) return [JSON.stringify(schema.const)];
   if (schema.enum) {
-    return schema.enum.length === 1 ? JSON.stringify(schema.enum[0]) : `enum(${schema.enum.map((v) => JSON.stringify(v)).join("|")})`;
+    const values = schema.enum.map((v) => JSON.stringify(v));
+    return [values.length === 1 ? values[0] : `enum(${values.join("|")})`];
   }
   const variants = schema.anyOf ?? schema.oneOf;
   if (variants) {
-    const types = [...new Set(variants.flatMap((variant) => splitTypes(typeOf(variant))))].filter((type) => type !== "null");
+    const types = [...new Set(variants.flatMap(typesOf))].filter((type) => type !== "null");
     const known = types.filter((type) => type !== "any");
-    return (known.length ? known : types).join("|") || "null";
+    return known.length ? known : types.length ? types : ["null"];
   }
-  if (isArray(schema)) return `${typeOf(schema.items)}[]`;
-  if (isMap(schema)) return `map<${schema.propertyNames?.enum?.join("|") ?? "string"}, ${typeOf(schema.additionalProperties)}>`;
-  const types = (Array.isArray(schema.type) ? schema.type : [schema.type]).filter((type) => type && type !== "null");
-  if (!types.length) return schema.properties || schema.allOf ? "object" : "any";
-  return types
-    .map((type) => {
-      if (type !== "string") return type;
-      if (schema.format) return `string(${schema.format})`;
-      return schema.pattern ? `string(pattern ${schema.pattern})` : type;
-    })
-    .join("|");
+  if (isArray(schema)) return [`${typeOf(schema.items)}[]`];
+  if (isMap(schema)) return [`map<${schema.propertyNames?.enum?.join("|") ?? "string"}, ${typeOf(schema.additionalProperties)}>`];
+  const types = [schema.type].flat().filter((type) => type && type !== "null");
+  if (!types.length) return [schema.properties || schema.allOf ? "object" : "any"];
+  return types.map((type) => {
+    if (type !== "string") return type;
+    if (schema.format) return `string(${schema.format})`;
+    return schema.pattern ? `string(pattern ${schema.pattern})` : type;
+  });
 }
+
+export const typeOf = (schema) => typesOf(schema).join("|");
 
 function short(text, max = 160) {
   return text ? String(text).replace(/\s+/g, " ").trim().slice(0, max) : undefined;
@@ -108,7 +79,6 @@ function discriminatorOf(branch) {
     if (isObject(prop) && "const" in prop) return `${name}=${prop.const}`;
     if (isObject(prop) && prop.enum?.length === 1) return `${name}=${prop.enum[0]}`;
   }
-  return undefined;
 }
 
 // What a value condition says, e.g. "=BANK", " in (a, b)", " not matching ^(CH|LI)".
@@ -117,10 +87,8 @@ function valueLabel(prop) {
   if ("const" in prop) return `=${prop.const}`;
   if (prop.enum) return ` in (${prop.enum.join(", ")})`;
   if (prop.pattern) return ` matching ${prop.pattern}`;
-  if (isObject(prop.not)) {
-    if ("const" in prop.not) return ` not ${prop.not.const}`;
-    return ` not${valueLabel(prop.not)}`;
-  }
+  if (isObject(prop.not) && "const" in prop.not) return ` not ${prop.not.const}`;
+  if (isObject(prop.not)) return ` not${valueLabel(prop.not)}`;
   return " given";
 }
 
@@ -143,12 +111,13 @@ function conditionLabel(condition) {
 // must all apply ("when", e.g. paymentDirection=IN and paymentType=BANK) and the alternatives that
 // replace the field ("unless", e.g. isTemplate=true).
 // exclusions: fields a branch forbids next to the fields it requires (productNumber not with productUuid).
-export function propertiesOf(schema) {
+function propertiesOf(schema) {
   const variants = new Map();
   const required = new Set();
   const conditions = new Map();
   const exclusions = new Map();
   if (!isObject(schema)) return { properties: {}, required, conditions, exclusions };
+  const add = (map, name, value) => map.set(name, [...(map.get(name) ?? []), value]);
 
   // Alternatives keep differing definitions as variants. Constraints (allOf, then/else) only refine a
   // field, so a bare re-declaration such as {type: "array"} does not replace or split a richer one.
@@ -164,93 +133,68 @@ export function propertiesOf(schema) {
       else list.push(prop);
     }
   };
-  const addClause = (name, clause) => {
-    const clauses = conditions.get(name) ?? [];
-    if (!clauses.some((known) => JSON.stringify(known) === JSON.stringify(clause))) clauses.push(clause);
-    conditions.set(name, clauses);
-  };
-  const addExclusion = (name, other) => {
-    if (!exclusions.has(name)) exclusions.set(name, new Set());
-    exclusions.get(name).add(other);
-  };
+  // Takes over a branch; "outer" holds the discriminator its own conditions additionally need.
   const merge = (sub, outer, refine) => {
     addProperties(sub.properties, refine);
     sub.conditions.forEach((clauses, name) =>
-      clauses.forEach((clause) => addClause(name, { when: outer ? [outer, ...clause.when] : clause.when, unless: clause.unless })),
+      clauses.forEach((clause) => add(conditions, name, { when: [...outer, ...clause.when], unless: clause.unless })),
     );
-    sub.exclusions.forEach((others, name) => others.forEach((other) => addExclusion(name, other)));
+    sub.exclusions.forEach((others, name) => others.forEach((other) => add(exclusions, name, other)));
   };
 
   addProperties(schema.properties, false);
   (schema.required ?? []).forEach((name) => required.add(name));
   for (const branch of schema.allOf ?? []) {
     const sub = propertiesOf(branch);
-    merge(sub, undefined, true);
+    merge(sub, [], true);
     sub.required.forEach((name) => required.add(name));
   }
-  const groups = [];
-  for (const branches of [schema.oneOf, schema.anyOf]) {
-    // A null branch only says the whole value may be null; it is no alternative for the fields.
-    const real = (branches ?? []).filter((branch) => !isNull(branch));
-    if (real.length) groups.push({ branches: real.map((branch) => ({ branch, discriminator: discriminatorOf(branch) })), refine: false });
-  }
+  // A null branch only says the whole value may be null; it is no alternative for the fields.
+  const groups = [schema.oneOf, schema.anyOf].map((branches) => ({ branches: (branches ?? []).filter((b) => !isNull(b)) }));
   if (isObject(schema.if) && (schema.then || schema.else)) {
     const label = conditionLabel(schema.if);
-    groups.push({
-      branches: [
-        { branch: schema.then ?? {}, discriminator: label },
-        { branch: schema.else ?? {}, discriminator: `not (${label})` },
-      ],
-      refine: true,
-    });
+    groups.push({ branches: [schema.then ?? {}, schema.else ?? {}], labels: [label, `not (${label})`], refine: true });
   }
-  for (const { branches, refine } of groups) {
-    const subs = branches.map(({ branch, discriminator }) => ({ ...propertiesOf(branch), branch, discriminator }));
-    // Without a discriminator a branch is named by the fields that only it requires.
-    const common = subs.reduce((shared, sub) => shared.filter((name) => sub.required.has(name)), [...subs[0].required]);
-    subs.forEach((sub, i) => {
-      const own = [...sub.required].filter((name) => !common.includes(name));
-      sub.label = sub.discriminator ?? (own.length ? `${own.join(" and ")} given` : sub.branch.title ?? `variant ${i + 1}`);
-    });
+  for (const { branches, labels, refine = false } of groups) {
+    if (!branches.length) continue;
+    const subs = branches.map((branch, i) => ({ ...propertiesOf(branch), branch, discriminator: labels?.[i] ?? discriminatorOf(branch) }));
     const byDiscriminator = subs.every((sub) => sub.discriminator);
-    subs.forEach((sub) => merge(sub, byDiscriminator ? sub.label : undefined, refine));
+    subs.forEach((sub, i) => {
+      // Without a discriminator a branch is named by the fields that only it requires.
+      const own = [...sub.required].filter((name) => subs.some((other) => !other.required.has(name)));
+      sub.label = sub.discriminator ?? (own.length ? `${own.join(" and ")} given` : sub.branch.title ?? `variant ${i + 1}`);
+      merge(sub, byDiscriminator ? [sub.label] : [], refine);
+    });
     for (const sub of subs) {
       for (const name of sub.required) {
         if (subs.every((other) => other.required.has(name))) required.add(name);
-        else if (byDiscriminator) addClause(name, { when: [sub.label], unless: [] });
-        else addClause(name, { when: [], unless: subs.filter((o) => !o.required.has(name)).map((o) => o.label) });
+        else if (byDiscriminator) add(conditions, name, { when: [sub.label], unless: [] });
+        else add(conditions, name, { when: [], unless: subs.filter((o) => !o.required.has(name)).map((o) => o.label) });
       }
       // Two fields exclude each other when a branch forbids one next to the other and no branch allows both.
       for (const [name, prop] of Object.entries(sub.branch.properties ?? {})) {
         if (prop !== false) continue;
         for (const other of sub.required) {
           const together = subs.some((s) => s.branch.properties?.[name] !== false && s.branch.properties?.[other] !== false);
-          if (!together) addExclusion(name, other);
+          if (!together) add(exclusions, name, other);
         }
       }
     }
   }
   // A required field without a definition of its own still has to show up.
   for (const name of [...required, ...conditions.keys()]) {
-    if (!variants.get(name)?.length) variants.set(name, [{}]);
+    if (!variants.has(name)) variants.set(name, [{}]);
   }
   for (const name of required) conditions.delete(name);
-
-  const properties = {};
-  for (const [name, list] of variants) properties[name] = list.length === 1 ? list[0] : { anyOf: list };
+  const properties = Object.fromEntries([...variants].map(([name, list]) => [name, list.length === 1 ? list[0] : { anyOf: list }]));
   return { properties, required, conditions, exclusions };
 }
 
-function descriptions(prop) {
-  if (!isObject(prop)) return [];
-  return [prop.description, ...(prop.anyOf ?? []).flatMap(descriptions)].filter(Boolean);
-}
+// The descriptions of a field and of the variants it was merged from.
+const descriptions = (prop) =>
+  isObject(prop) ? [short(prop.description), ...(prop.anyOf ?? []).flatMap(descriptions)].filter(Boolean) : [];
 
-function descriptionOf(prop) {
-  return short([...new Set(descriptions(prop).map((text) => short(text)))].join(" | "), 240);
-}
-
-export function fieldsOf(schema, prefix = "", depth = 1) {
+function fieldsOf(schema, prefix = "") {
   if (!isObject(schema)) return [];
   const { properties, required, conditions, exclusions } = propertiesOf(itemsOf(schema) ?? schema);
   const fields = [];
@@ -269,74 +213,65 @@ export function fieldsOf(schema, prefix = "", depth = 1) {
       if (ifs.length) field.requiredIf = ifs.join(" or ");
       if (unless.length) field.requiredUnless = unless.join(" or ");
     }
-    if (exclusions.has(name)) field.notWith = [...exclusions.get(name)].join(", ");
+    if (exclusions.has(name)) field.notWith = [...new Set(exclusions.get(name))].join(", ");
     // A null variant with a meaning ("No bank account will be used") is kept as a note.
     const nullVariant = (prop.oneOf ?? prop.anyOf ?? []).find((v) => isNull(v) && (v.title || v.description));
     if (nullVariant) field.nullMeans = short(nullVariant.title ?? nullVariant.description);
-    const description = descriptionOf(prop);
+    const description = short([...new Set(descriptions(prop))].join(" | "), 240);
     if (prop.deprecated || /^deprecated/i.test(description ?? "")) field.deprecated = true;
     if (description) field.description = description;
     fields.push(field);
 
+    // Nested fields of objects, list items and map values; a list inside a list is left out.
     const items = itemsOf(prop);
     const child = items ?? (isMap(prop) ? prop.additionalProperties : prop);
-    const childPrefix = `${prefix}${name}${items ? "[]" : ""}${isMap(prop) ? ".<key>" : ""}.`;
-    if (!isObject(child) || !Object.keys(propertiesOf(child).properties).length) continue;
-    if (depth < MAX_DEPTH) fields.push(...fieldsOf(child, childPrefix, depth + 1));
-    else field.note = "nested fields omitted";
+    if (Object.keys(propertiesOf(child).properties).length) {
+      fields.push(...fieldsOf(child, `${prefix}${name}${items ? "[]" : isMap(prop) ? ".<key>" : ""}.`));
+    }
   }
   return fields;
 }
 
-// The catalog entries of one area's spec.
+// The catalog entries of one area's spec. Undefined values are left out of the JSON.
 export function endpointsOf(area, raw) {
   const spec = inlineRefs(raw, raw);
   const endpoints = [];
   for (const [path, item] of Object.entries(spec.paths ?? {})) {
-    for (const method of METHODS) {
+    for (const method of METHODS.filter((m) => item[m])) {
       const op = item[method];
-      if (!op) continue;
       const params = [...(item.parameters ?? []), ...(op.parameters ?? [])]
         .filter((p) => p.name !== "accountUuid")
-        .map((p) => {
-          const param = { name: p.name, in: p.in, type: typeOf(p.schema) };
-          if (p.required) param.required = true;
-          const description = short(p.description);
-          if (description) param.description = description;
-          return param;
-        });
+        .map((p) => ({ name: p.name, in: p.in, type: typeOf(p.schema), required: p.required || undefined, description: short(p.description) }));
       const content = op.requestBody?.content ?? {};
-      const entry = { area, method: method.toUpperCase(), path, summary: short(op.summary) ?? short(op.description) ?? "" };
-      if (op.tags?.[0]) entry.tag = op.tags[0];
-      if (op.deprecated) entry.deprecated = true;
-      if (params.length) entry.params = params;
       const body = fieldsOf(content["application/json"]?.schema);
-      if (body.length) entry.body = body;
-      if (!content["application/json"] && content["multipart/form-data"]) {
-        entry.note = "Expects a multipart/form-data file upload, which abaninja_request cannot send.";
-      }
-      endpoints.push(entry);
+      endpoints.push({
+        area,
+        method: method.toUpperCase(),
+        path,
+        summary: short(op.summary) ?? short(op.description) ?? "",
+        tag: op.tags?.[0],
+        deprecated: op.deprecated || undefined,
+        params: params.length ? params : undefined,
+        body: body.length ? body : undefined,
+        note: content["multipart/form-data"] && !content["application/json"]
+          ? "Expects a multipart/form-data file upload, which abaninja_request cannot send."
+          : undefined,
+      });
     }
   }
   return endpoints;
 }
 
-async function main() {
+// Run as a script; the tests import the functions instead.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const endpoints = [];
   for (const area of AREAS) {
-    try {
-      const response = await fetch(`${SPEC_BASE}/${area}-v2.json`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const found = endpointsOf(area, await response.json());
-      if (!found.length) throw new Error("the spec has no endpoints");
-      endpoints.push(...found);
-    } catch (error) {
-      throw new Error(`Spec "${area}": ${error.message}`);
-    }
+    const response = await fetch(`${SPEC_BASE}/${area}-v2.json`);
+    if (!response.ok) throw new Error(`Spec "${area}": HTTP ${response.status}`);
+    const found = endpointsOf(area, await response.json());
+    if (!found.length) throw new Error(`Spec "${area}" has no endpoints`);
+    endpoints.push(...found);
   }
-  await mkdir(new URL(".", OUTPUT), { recursive: true });
   await writeFile(OUTPUT, JSON.stringify(endpoints) + "\n");
   console.log(`${endpoints.length} endpoints written to catalog/endpoints.json`);
 }
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

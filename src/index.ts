@@ -13,13 +13,10 @@ let config;
 try {
   config = loadConfig();
 } catch (error) {
-  console.error(`abaninja-mcp: ${error instanceof Error ? error.message : error}`);
+  console.error(`abaninja-mcp: ${(error as Error).message}`);
   process.exit(1);
 }
-const client = new AbaNinjaClient(config);
 const server = new McpServer({ name: "abaninja-mcp", version });
-
-registerTools(server, client);
-
+registerTools(server, new AbaNinjaClient(config));
 await server.connect(new StdioServerTransport());
 console.error(`abaninja-mcp ${version} running in ${config.mode} mode`);
