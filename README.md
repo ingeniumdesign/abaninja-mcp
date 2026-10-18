@@ -21,7 +21,7 @@ Standardmässig kann der Server nur lesen. Alles Weitere schaltet man über `ABA
 | Modus | Erlaubt | Gesperrt |
 | --- | --- | --- |
 | `read` (Standard) | nur Lesen | alles, was etwas ändert |
-| `write` | zusätzlich Anlegen und Ändern | Löschen, Versenden, Mahnen, Stornieren, Massenaktionen |
+| `write` | zusätzlich Anlegen und Ändern | Löschen, Versenden (auch Zahlungsbestätigungen), Mahnen, Stornieren, Massenaktionen, ausgehende Webhooks |
 | `full` | die ganze API | nichts |
 
 ## Voraussetzungen
@@ -62,6 +62,8 @@ Beispiel für Claude Desktop (`claude_desktop_config.json`) oder Claude Code (`.
 ```bash
 npm install
 npm run build
+npm test          # Tests ohne Netz, mit erfundenen Daten
+npm run catalog   # Endpunkt-Katalog aus den aktuellen OpenAPI-Specs neu erzeugen
 ```
 
 Eigenheiten der AbaNinja-API, die beim Bau aufgefallen sind: [docs/abaninja-api.md](docs/abaninja-api.md)

@@ -53,4 +53,8 @@ Was beim Bau dieses Servers an der AbaNinja-API aufgefallen ist. Stand Oktober 2
 ## OpenAPI-Specs
 
 - Es gibt Specs für `accounting`, `accounts`, `addresses`, `documents`, `exports`, `finances`, `holidays`, `products`, `time-tracking`, `units`, `warehouse` und `webhooks` (`/specs/<bereich>-v2.json`). Zusammen sind das 539 Endpunkte, davon über die Hälfte in `documents` (die Spec ist rund 2.6 MB gross).
-- Die Specs enthalten die Schemas direkt, ohne `$ref`. `npm run catalog` verdichtet sie zu `catalog/endpoints.json`.
+- Die meisten Specs enthalten die Schemas direkt, nur die Adressen-Spec verweist mit `$ref` auf `components`. `npm run catalog` löst die Verweise auf und verdichtet alles zu `catalog/endpoints.json`.
+- Viele Request-Bodies sind Varianten (`oneOf`/`anyOf`): `receiver` einer Rechnung braucht entweder `companyUuid` oder `personUuid` (jeweils mit `addressUuid`) oder eine `customerNumber`, Positionen unterscheiden sich über `kind` (`product`, `subtitle`, `text`, `group` usw.). Der Katalog markiert Felder, die immer nötig sind, mit `required`. Bedingte Pflichtfelder stehen mit `requiredIf` (z. B. `type=company`) oder `requiredUnless` (z. B. `isTemplate=true`).
+- Das Backend ist Laravel und wertet `_method` aus: Ein POST mit `_method=DELETE` wird als DELETE ausgeführt. Die Modi `read` und `write` lassen solche Parameter deshalb nicht durch.
+- Einige Endpunkte liefern Dateien (PDF-Vorschau, Logo, ZIP) statt JSON. Der Server zeigt dafür nur Typ und Grösse an. Datei-Uploads (`multipart/form-data`, 12 Endpunkte) kann `abaninja_request` nicht senden; der Katalog markiert sie.
+- Zahlungen (`/finances/v2/payments`) können mit `processing.sendPaymentConfirmation` eine E-Mail an den Kunden auslösen. Im Modus `write` ist das gesperrt.

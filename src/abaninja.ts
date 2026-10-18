@@ -10,12 +10,17 @@ export interface Config {
   mode: Mode;
 }
 
-export type Query = Record<string, string | number | boolean>;
+export type QueryValue = string | number | boolean | (string | number)[];
+export type Query = Record<string, QueryValue>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const token = env.ABANINJA_API_TOKEN?.trim();
   if (!token) {
     throw new Error("ABANINJA_API_TOKEN is not set.");
+  }
+  // A line break or control character would end up in error messages together with the token.
+  if (!/^[\x21-\x7e]+$/.test(token)) {
+    throw new Error("ABANINJA_API_TOKEN contains spaces, line breaks or other invalid characters.");
   }
   const mode = env.ABANINJA_MODE?.trim() || "read";
   if (mode !== "read" && mode !== "write" && mode !== "full") {
@@ -24,25 +29,52 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return { token, accountUuid: env.ABANINJA_ACCOUNT_UUID?.trim() || undefined, mode };
 }
 
-// Actions that send, delete, cancel or dun documents, plus all bulk actions.
+// Only plain API paths: segments of letters, digits, "-", "_" and placeholders like {accountUuid}.
+// No query string, fragment, dots, percent escapes, whitespace or empty segments, so the path that
+// is checked below is exactly the path that is sent, and the request cannot leave api.abaninja.ch.
+const PATH_PATTERN = /^(\/[A-Za-z0-9{}_-]+)+$/;
+
+// Calls that send, delete, cancel or dun documents, bulk actions and outgoing webhooks.
 // They stay blocked in "write" mode and are only allowed in "full" mode.
 const BLOCKED_IN_WRITE: RegExp[] = [
   /\/actions\/(email|plannedMail|sendAbaNet|sendPaymentConfirmation|delete|cancel|cancelPermanently|dunningSent|dunningPrint|setDunningAmounts)$/i,
   /\/bulk-actions(\/|$)/i,
+  /\/webhooks\/v2\/outgoing-webhooks(\/|$)/i,
 ];
+const PAYMENTS = /\/finances\/v2\/payments(\/[^/]+)?$/i;
+
+// The backend honours a method override ("_method=DELETE" on a POST, also written ".method" or " _method",
+// which PHP turns into "_method"). Such keys would turn an allowed POST into a blocked DELETE.
+const METHOD_OVERRIDE = /^[\s._]*method$/i;
+
+function hasMethodOverride(query?: Query, body?: unknown): boolean {
+  const keys = [
+    ...Object.keys(query ?? {}),
+    ...(body && typeof body === "object" && !Array.isArray(body) ? Object.keys(body) : []),
+  ];
+  return keys.some((key) => METHOD_OVERRIDE.test(key));
+}
 
 // Returns why a call is not allowed in the given mode, or null when it is allowed.
-export function checkAllowed(mode: Mode, method: string, path: string): string | null {
+export function checkAllowed(mode: Mode, method: string, path: string, body?: unknown, query?: Query): string | null {
   const verb = method.toUpperCase();
   if (mode === "full") return null;
-  if (mode === "read") {
-    return verb === "GET" ? null : `${verb} is not allowed in read mode. Set ABANINJA_MODE=write to allow changes.`;
+  if (hasMethodOverride(query, body)) {
+    return "A _method parameter would change the HTTP method. It is only allowed in full mode.";
   }
-  if (!["GET", "POST", "PATCH", "PUT"].includes(verb)) {
+  if (verb === "GET") return null;
+  if (mode === "read") {
+    return `${verb} is not allowed in read mode. Set ABANINJA_MODE=write to allow changes.`;
+  }
+  if (!["POST", "PATCH", "PUT"].includes(verb)) {
     return `${verb} is only allowed in full mode.`;
   }
   if (BLOCKED_IN_WRITE.some((pattern) => pattern.test(path))) {
-    return "This action sends, deletes, cancels or dunns documents and is only allowed in full mode.";
+    return "This call sends, deletes, cancels or dunns documents, runs a bulk action or changes outgoing webhooks. It is only allowed in full mode.";
+  }
+  const processing = (body as { processing?: { sendPaymentConfirmation?: unknown } } | undefined)?.processing;
+  if (PAYMENTS.test(path) && processing?.sendPaymentConfirmation === true) {
+    return "sendPaymentConfirmation e-mails the customer and is only allowed in full mode.";
   }
   return null;
 }
@@ -72,22 +104,26 @@ export class AbaNinjaClient {
 
   // Calls an endpoint within the configured mode. "{accountUuid}" in the path is filled in automatically.
   async request(method: string, path: string, options: { query?: Query; body?: unknown } = {}): Promise<unknown> {
-    const blocked = checkAllowed(this.config.mode, method, path);
-    if (blocked) throw new Error(blocked);
-    // Keep the bearer token on api.abaninja.ch: only plain paths, no full URLs or "//host".
-    if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\") || path.includes("://")) {
-      throw new Error("path must be an API path starting with a single /, not a URL.");
+    if (!PATH_PATTERN.test(path)) {
+      throw new Error("path must be a plain API path like /accounts/{accountUuid}/documents/v2/invoices. Put query parameters into query.");
     }
+    const blocked = checkAllowed(this.config.mode, method, path, options.body, options.query);
+    if (blocked) throw new Error(blocked);
     const resolved = path.includes("{accountUuid}")
-      ? path.replace("{accountUuid}", await this.getAccountUuid())
+      ? path.replaceAll("{accountUuid}", await this.getAccountUuid())
       : path;
     return this.send(method, resolved, options);
   }
 
   private async send(method: string, path: string, options: { query?: Query; body?: unknown } = {}): Promise<unknown> {
     const url = new URL(path, API_BASE);
+    if (url.origin !== API_BASE) {
+      throw new Error("Requests may only go to api.abaninja.ch.");
+    }
     for (const [key, value] of Object.entries(options.query ?? {})) {
-      url.searchParams.set(key, String(value));
+      for (const item of Array.isArray(value) ? value : [value]) {
+        url.searchParams.append(key, String(item));
+      }
     }
     const hasBody = options.body !== undefined;
     const response = await fetch(url, {
@@ -99,10 +135,17 @@ export class AbaNinjaClient {
       },
       body: hasBody ? JSON.stringify(options.body) : undefined,
     });
-    const text = await response.text();
     if (!response.ok) {
+      const text = await response.text();
       throw new Error(`AbaNinja API ${response.status}: ${text.slice(0, 500)}`);
     }
+    // Files (PDF, images, ZIP) are described, not decoded into unreadable text.
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType && !/json|^text\/|xml/i.test(contentType)) {
+      const bytes = (await response.arrayBuffer()).byteLength;
+      return { contentType, bytes, note: "Binary content is not shown." };
+    }
+    const text = await response.text();
     if (!text) return null;
     try {
       return JSON.parse(text);

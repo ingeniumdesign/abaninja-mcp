@@ -17,7 +17,16 @@ interface Endpoint {
   summary: string;
   tag?: string;
   params?: { name: string; in: string; type: string; required?: boolean; description?: string }[];
-  body?: { name: string; type: string; required?: boolean; description?: string }[];
+  body?: {
+    name: string;
+    type: string;
+    required?: boolean;
+    requiredIf?: string;
+    requiredUnless?: string;
+    description?: string;
+    note?: string;
+  }[];
+  note?: string;
 }
 
 type Row = Record<string, any>;
@@ -49,14 +58,57 @@ function prune(value: unknown): unknown {
   return value === null || value === "" ? undefined : value;
 }
 
+function isPage(value: unknown): value is { offset: number; items: unknown[] } {
+  const page = value as { offset?: unknown; items?: unknown } | null;
+  return !!page && typeof page.offset === "number" && Array.isArray(page.items);
+}
+
+// The main list of a raw API answer: the answer itself, data, or data.documents.
+function listOf(value: any): unknown[] | undefined {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.data)) return value.data;
+  if (Array.isArray(value?.data?.documents)) return value.data.documents;
+  return undefined;
+}
+
+function withList(value: any, items: unknown[], total: number): unknown {
+  const shortened = { shown: items.length, total, hint: "Fetch the rest with the page and limit (or perPage) parameters." };
+  if (Array.isArray(value)) return { shortened, items };
+  if (Array.isArray(value.data)) return { shortened, ...value, data: items };
+  return { shortened, ...value, data: { ...value.data, documents: items } };
+}
+
 function reply(data: unknown) {
-  let text = JSON.stringify(prune(data) ?? null, null, 1);
+  let value: any = prune(data) ?? null;
+  let text = JSON.stringify(value, null, 1);
+  if (text.length > MAX_RESPONSE_CHARS && isPage(value)) {
+    // A page of this server drops whole items from the end, so count and nextOffset stay exact.
+    while (text.length > MAX_RESPONSE_CHARS && value.items.length > 1) {
+      const keep = Math.max(1, Math.floor((value.items.length * MAX_RESPONSE_CHARS) / text.length) - 1);
+      const items = value.items.slice(0, keep);
+      value = { ...value, count: items.length, nextOffset: value.offset + items.length, items, shortened: true };
+      text = JSON.stringify(value, null, 1);
+    }
+  } else if (text.length > MAX_RESPONSE_CHARS && listOf(value)) {
+    // A raw API list drops whole entries from the end and says how many are shown.
+    const all = listOf(value) ?? [];
+    let keep = all.length;
+    while (text.length > MAX_RESPONSE_CHARS && keep > 1) {
+      keep = Math.max(1, Math.floor((keep * MAX_RESPONSE_CHARS) / text.length) - 1);
+      text = JSON.stringify(withList(value, all.slice(0, keep), all.length), null, 1);
+    }
+  }
   if (text.length > MAX_RESPONSE_CHARS) {
     text =
       text.slice(0, MAX_RESPONSE_CHARS) +
-      `\n… truncated (${text.length} characters). Narrow the request with limit, page or filters.`;
+      `\n… cut off after ${MAX_RESPONSE_CHARS} of ${text.length} characters, so the JSON above is incomplete. Request fewer entries or a single record.`;
   }
   return { content: [{ type: "text" as const, text }] };
+}
+
+// Today's date in Switzerland as YYYY-MM-DD: AbaNinja due dates are Swiss calendar dates.
+function swissToday(): string {
+  return new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Zurich" });
 }
 
 function fail(error: unknown) {
@@ -98,7 +150,14 @@ function cached<T>(load: () => Promise<T>): () => Promise<T> {
 
 function paged<T>(items: T[], offset: number, limit: number) {
   const slice = items.slice(offset, offset + limit);
-  return { total: items.length, offset, count: slice.length, items: slice };
+  const next = offset + slice.length;
+  return {
+    total: items.length,
+    offset,
+    count: slice.length,
+    nextOffset: next < items.length ? next : undefined,
+    items: slice,
+  };
 }
 
 function addressView(row: Row, kind: "company" | "person") {
@@ -124,17 +183,46 @@ function addressView(row: Row, kind: "company" | "person") {
   };
 }
 
+const normalize = (text: string) => text.normalize("NFC").toLowerCase();
+
+// Phone numbers starting with +, 00 or 0, written with spaces, dots, dashes, slashes or brackets.
+const PHONE = /(?:\+|\b0)\d[\d\s()/.-]{5,}\d/g;
+
+// A phone number as international digits: "+41 44 123 45 67" and "044 123 45 67" both give "41441234567".
+function phoneKey(text: string): string {
+  const digits = text.replace(/\D/g, "");
+  if (digits.startsWith("00")) return digits.slice(2);
+  if (digits.startsWith("0")) return `41${digits.slice(1)}`;
+  return digits;
+}
+
+// Splits a search query into words without surrounding punctuation; phone numbers become one key.
+function queryWords(query: string): string[] {
+  const text = normalize(query);
+  const phones = (text.match(PHONE) ?? []).map(phoneKey);
+  const words = text
+    .replace(PHONE, " ")
+    .split(/[\s,;]+/)
+    .map((word) => word.replace(/^[^\p{L}\p{N}@+]+|[^\p{L}\p{N}]+$/gu, ""));
+  return [...words, ...phones].filter(Boolean);
+}
+
 function searchText(row: Row): string {
+  const contacts: Row[] = [
+    ...(row.contacts ?? []),
+    ...(row.contact_persons ?? []).flatMap((p: Row) => p.contacts ?? []),
+  ];
   const parts: unknown[] = [
     row.company_name, row.first_name, row.last_name, row.customer_number, row.id_number, row.vat_number,
     ...(row.tags ?? []),
-    ...(row.contacts ?? []).map((c: Row) => c.value),
-    ...(row.addresses ?? []).flatMap((a: Row) => [a.address, a.zip_code, a.city]),
-    ...(row.contact_persons ?? []).flatMap((p: Row) => [
-      p.first_name, p.last_name, ...(p.contacts ?? []).map((c: Row) => c.value),
+    ...contacts.map((c) => c.value),
+    ...contacts.filter((c) => /phone|mobile|fax/i.test(String(c.type))).map((c) => phoneKey(String(c.value))),
+    ...(row.addresses ?? []).flatMap((a: Row) => [
+      a.address, a.street_number, a.extension, a.additional_field, a.zip_code, a.city,
     ]),
+    ...(row.contact_persons ?? []).flatMap((p: Row) => [p.first_name, p.last_name]),
   ];
-  return parts.filter(Boolean).join(" ").toLowerCase();
+  return normalize(parts.filter(Boolean).join(" "));
 }
 
 const methodSchema = z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]);
@@ -193,7 +281,7 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
     {
       title: "Describe an AbaNinja API endpoint",
       description:
-        "Show the parameters and request body fields of one endpoint from the catalog. Path as listed by abaninja_list_endpoints (with {accountUuid}).",
+        "Show the parameters and request body fields of one endpoint from the catalog. Path as listed by abaninja_list_endpoints (with {accountUuid}). Fields with required are always needed; requiredIf names the variant that needs them (e.g. type=company), requiredUnless the alternative that replaces them (e.g. isTemplate=true). Nested fields use dots, list items [].",
       inputSchema: {
         method: methodSchema,
         path: z.string().describe("Endpoint path, e.g. /accounts/{accountUuid}/documents/v2/invoices"),
@@ -222,8 +310,13 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
         "Call any AbaNinja REST API endpoint. Put {accountUuid} in the path and it is filled in automatically. Which methods and actions are allowed depends on the server mode (ABANINJA_MODE: read = GET only, write = also create/change, full = everything incl. delete/send/dun). POST, PATCH, PUT and DELETE change data in the real account.",
       inputSchema: {
         method: methodSchema,
-        path: z.string().describe("Path starting with /, e.g. /accounts/{accountUuid}/documents/v2/invoices"),
-        query: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional().describe("Query parameters"),
+        path: z
+          .string()
+          .describe("Plain path as listed in the catalog, e.g. /accounts/{accountUuid}/documents/v2/invoices. No query string."),
+        query: z
+          .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number()]))]))
+          .optional()
+          .describe("Query parameters; lists repeat the key, e.g. {\"tags[]\": [\"VIP\", \"A\"]}"),
         body: z.unknown().optional().describe("JSON request body"),
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -255,7 +348,7 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
     },
     async ({ query, kind, tag, include_archived, limit, offset }) => {
       try {
-        const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+        const words = queryWords(query ?? "");
         const hits = (await loadAddresses()).filter(({ row, kind: rowKind }) => {
           if (kind !== "all" && rowKind !== kind) return false;
           if (!include_archived && row.isArchived) return false;
@@ -276,7 +369,7 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
     {
       title: "List open AbaNinja invoices",
       description:
-        "Open invoices (openAmount > 0, not cancelled, no templates; drafts only with include_drafts) with amount, due date and dunning level, sorted by due date. Optionally only for one customer: pass the company or person uuid from abaninja_search_addresses. The API has no customer filter, so invoices are loaded and filtered locally.",
+        "Open invoices (openAmount > 0, not cancelled, no templates; drafts only with include_drafts) with amount, due date and dunning level, sorted by due date. Totals are given per currency (CHF and EUR are never added up). Optionally only for one customer: pass the company or person uuid from abaninja_search_addresses. The API has no customer filter, so invoices are loaded and filtered locally.",
       inputSchema: {
         company_uuid: z.string().optional().describe("Customer company uuid (receiver.companyUuid)"),
         person_uuid: z.string().optional().describe("Customer person uuid (receiver.personUuid)"),
@@ -295,19 +388,31 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
           { is_template: false },
           (b) => b.data?.documents ?? [],
         );
-        const today = new Date().toISOString().slice(0, 10);
+        const today = swissToday();
+        const isOverdue = (i: Row) => !!i.dueDate && String(i.dueDate).slice(0, 10) < today;
         const open = invoices
           .filter((i) => Number(i.openAmount) > 0 && !i.isCancelled && !i.isTemplate)
           .filter((i) => include_drafts || i.status !== "draft")
           .filter((i) => !company_uuid || i.receiver?.companyUuid === company_uuid)
           .filter((i) => !person_uuid || i.receiver?.personUuid === person_uuid)
-          .filter((i) => !overdue_only || (i.dueDate && i.dueDate < today))
+          .filter((i) => !overdue_only || isOverdue(i))
           .sort((a, b) => String(a.dueDate ?? "").localeCompare(String(b.dueDate ?? "")));
-        const total = open.reduce((sum, i) => sum + Number(i.openAmount), 0);
+        // Amounts are summed per currency: CHF and EUR must never be added up.
+        const totals: Record<string, number> = {};
+        for (const i of open) {
+          const currency = i.currencyCode ?? "unknown";
+          totals[currency] = (totals[currency] ?? 0) + Number(i.openAmount);
+        }
+        for (const currency of Object.keys(totals)) {
+          totals[currency] = Math.round(totals[currency] * 100) / 100;
+        }
         const result = paged(open, offset, limit);
         return reply({
-          ...result,
-          totalOpenAmount: Math.round(total * 100) / 100,
+          total: result.total,
+          totalOpenAmountByCurrency: totals,
+          offset: result.offset,
+          count: result.count,
+          nextOffset: result.nextOffset,
           items: result.items.map((i) => ({
             uuid: i.uuid,
             invoiceNumber: i.invoiceNumber,
@@ -319,7 +424,7 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
             personUuid: i.receiver?.personUuid,
             invoiceDate: i.invoiceDate,
             dueDate: i.dueDate,
-            overdue: i.dueDate ? i.dueDate < today : undefined,
+            overdue: i.dueDate ? isOverdue(i) : undefined,
             currency: i.currencyCode,
             documentTotal: i.documentTotal,
             openAmount: i.openAmount,

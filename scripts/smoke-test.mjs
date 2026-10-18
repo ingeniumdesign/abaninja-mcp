@@ -56,7 +56,7 @@ r = await call("abaninja_request", { method: "POST", path: "/accounts/{accountUu
 check("request POST blocked in read mode", r.isError && /not allowed in read mode/.test(r.text), r.text.slice(0, 80));
 
 r = await call("abaninja_request", { method: "GET", path: "https://example.com/x" });
-check("request rejects full URLs", r.isError && /not a URL/.test(r.text));
+check("request rejects full URLs", r.isError && /plain API path/.test(r.text));
 
 r = await call("abaninja_search_addresses", { limit: 3 });
 check("search_addresses list", !r.isError && r.json.total > 0, `${r.json?.total} addresses`);
@@ -68,7 +68,7 @@ r = await call("abaninja_search_addresses", { query: first?.customerNumber, limi
 check("search_addresses by customer number", !r.isError && r.json.total > 0);
 
 r = await call("abaninja_open_invoices", { limit: 3 });
-check("open_invoices", !r.isError && typeof r.json.totalOpenAmount === "number", `${r.json?.total} open, sum ${r.json?.totalOpenAmount}`);
+check("open_invoices", !r.isError && typeof r.json.totalOpenAmountByCurrency === "object", `${r.json?.total} open, ${JSON.stringify(r.json?.totalOpenAmountByCurrency)}`);
 const inv = r.json?.items?.[0];
 if (inv) {
   const key = inv.companyUuid ? { company_uuid: inv.companyUuid } : { person_uuid: inv.personUuid };
