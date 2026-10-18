@@ -71,8 +71,12 @@ function listOf(value: any): unknown[] | undefined {
   return undefined;
 }
 
-function withList(value: any, items: unknown[], total: number): unknown {
-  const shortened = { shown: items.length, total, hint: "Fetch the rest with the page and limit (or perPage) parameters." };
+function withList(value: any, items: unknown[], entriesOnPage: number): unknown {
+  const shortened = {
+    shown: items.length,
+    entriesOnPage,
+    hint: "Only the first entries of this page fit. Request a smaller limit (or perPage) to see the rest of the page.",
+  };
   if (Array.isArray(value)) return { shortened, items };
   if (Array.isArray(value.data)) return { shortened, ...value, data: items };
   return { shortened, ...value, data: { ...value.data, documents: items } };
@@ -188,23 +192,28 @@ const normalize = (text: string) => text.normalize("NFC").toLowerCase();
 // Phone numbers starting with +, 00 or 0, written with spaces, dots, dashes, slashes or brackets.
 const PHONE = /(?:\+|\b0)\d[\d\s()/.-]{5,}\d/g;
 
-// A phone number as international digits: "+41 44 123 45 67" and "044 123 45 67" both give "41441234567".
+// A phone number as international digits: "+41 44 123 45 67", "+41 (0)44 123 45 67" and "044 123 45 67"
+// all give "41441234567".
 function phoneKey(text: string): string {
-  const digits = text.replace(/\D/g, "");
+  const digits = text.replace(/\(\s*0\s*\)/g, "").replace(/\D/g, "");
   if (digits.startsWith("00")) return digits.slice(2);
   if (digits.startsWith("0")) return `41${digits.slice(1)}`;
   return digits;
 }
 
-// Splits a search query into words without surrounding punctuation; phone numbers become one key.
-function queryWords(query: string): string[] {
+// Splits a search query into terms. Each term lists the spellings that count as a match: a word without
+// surrounding punctuation, and for something that looks like a phone number also its digits and phone key,
+// so "01234567" still finds a customer number and "044 123 45 67" finds "+41 44 123 45 67".
+function queryTerms(query: string): string[][] {
   const text = normalize(query);
-  const phones = (text.match(PHONE) ?? []).map(phoneKey);
+  const phones = (text.match(PHONE) ?? []).map((phone) => [phone.trim(), phone.replace(/\D/g, ""), phoneKey(phone)]);
   const words = text
     .replace(PHONE, " ")
     .split(/[\s,;]+/)
-    .map((word) => word.replace(/^[^\p{L}\p{N}@+]+|[^\p{L}\p{N}]+$/gu, ""));
-  return [...words, ...phones].filter(Boolean);
+    .map((word) => word.replace(/^[^\p{L}\p{N}@+]+|[^\p{L}\p{N}]+$/gu, ""))
+    .filter(Boolean)
+    .map((word) => [word]);
+  return [...words, ...phones];
 }
 
 function searchText(row: Row): string {
@@ -348,13 +357,13 @@ export function registerTools(server: McpServer, client: AbaNinjaClient): void {
     },
     async ({ query, kind, tag, include_archived, limit, offset }) => {
       try {
-        const words = queryWords(query ?? "");
+        const terms = queryTerms(query ?? "");
         const hits = (await loadAddresses()).filter(({ row, kind: rowKind }) => {
           if (kind !== "all" && rowKind !== kind) return false;
           if (!include_archived && row.isArchived) return false;
           if (tag && !(row.tags ?? []).some((t: string) => t.toLowerCase() === tag.toLowerCase())) return false;
           const text = searchText(row);
-          return words.every((word) => text.includes(word));
+          return terms.every((spellings) => spellings.some((spelling) => text.includes(spelling)));
         });
         const result = paged(hits, offset, limit);
         return reply({ ...result, items: result.items.map(({ row, kind: rowKind }) => addressView(row, rowKind)) });

@@ -43,22 +43,38 @@ const BLOCKED_IN_WRITE: RegExp[] = [
 ];
 const PAYMENTS = /\/finances\/v2\/payments(\/[^/]+)?$/i;
 
-// The backend honours a method override ("_method=DELETE" on a POST, also written ".method" or " _method",
-// which PHP turns into "_method"). Such keys would turn an allowed POST into a blocked DELETE.
-const METHOD_OVERRIDE = /^[\s._]*method$/i;
+// The name PHP gives a parameter: it stops at a NUL byte, drops leading spaces, turns " " and "." into "_"
+// and starts array syntax at "[". So "_method\0x", " .method" and "_method[]" all arrive as "_method".
+function phpKey(key: string): string {
+  return key.split("\0")[0].replace(/^\s+/, "").replace(/[ .]/g, "_").split("[")[0];
+}
 
+function bodyKeys(body: unknown): string[] {
+  return body && typeof body === "object" && !Array.isArray(body) ? Object.keys(body) : [];
+}
+
+// The backend honours a method override ("_method=DELETE" on a POST), which would turn an allowed POST
+// into a blocked DELETE.
 function hasMethodOverride(query?: Query, body?: unknown): boolean {
-  const keys = [
-    ...Object.keys(query ?? {}),
-    ...(body && typeof body === "object" && !Array.isArray(body) ? Object.keys(body) : []),
-  ];
-  return keys.some((key) => METHOD_OVERRIDE.test(key));
+  return [...Object.keys(query ?? {}), ...bodyKeys(body)].some((key) => /^_*method$/i.test(phpKey(key)));
+}
+
+// Payment confirmation e-mails: the flag counts unless it is missing or clearly false, and "processing"
+// must not be smuggled in through the query string.
+function sendsPaymentConfirmation(query?: Query, body?: unknown): boolean {
+  const flag = (body as { processing?: { sendPaymentConfirmation?: unknown } } | undefined)?.processing
+    ?.sendPaymentConfirmation;
+  const flagSet = flag !== undefined && flag !== null && ![false, 0, "0", "false", ""].includes(flag as never);
+  return flagSet || Object.keys(query ?? {}).some((key) => phpKey(key).toLowerCase().startsWith("processing"));
 }
 
 // Returns why a call is not allowed in the given mode, or null when it is allowed.
 export function checkAllowed(mode: Mode, method: string, path: string, body?: unknown, query?: Query): string | null {
   const verb = method.toUpperCase();
   if (mode === "full") return null;
+  if (Object.keys(query ?? {}).some((key) => /[\x00-\x1f\x7f]/.test(key))) {
+    return "Query parameter names must not contain control characters.";
+  }
   if (hasMethodOverride(query, body)) {
     return "A _method parameter would change the HTTP method. It is only allowed in full mode.";
   }
@@ -72,9 +88,8 @@ export function checkAllowed(mode: Mode, method: string, path: string, body?: un
   if (BLOCKED_IN_WRITE.some((pattern) => pattern.test(path))) {
     return "This call sends, deletes, cancels or dunns documents, runs a bulk action or changes outgoing webhooks. It is only allowed in full mode.";
   }
-  const processing = (body as { processing?: { sendPaymentConfirmation?: unknown } } | undefined)?.processing;
-  if (PAYMENTS.test(path) && processing?.sendPaymentConfirmation === true) {
-    return "sendPaymentConfirmation e-mails the customer and is only allowed in full mode.";
+  if (PAYMENTS.test(path) && sendsPaymentConfirmation(query, body)) {
+    return "sendPaymentConfirmation e-mails the customer and is only allowed in full mode. Leave it out or set it to false; processing belongs in the body.";
   }
   return null;
 }

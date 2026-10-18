@@ -28,12 +28,15 @@ function inlineRefs(node, spec, stack = []) {
 }
 
 const isObject = (schema) => !!schema && typeof schema === "object" && !Array.isArray(schema);
+const isEmpty = (schema) => isObject(schema) && Object.keys(schema).length === 0;
 const isArray = (schema) =>
   isObject(schema) &&
   (schema.type === "array" ||
     (Array.isArray(schema.type) && schema.type.includes("array")) ||
     (!schema.type && "items" in schema));
 const isMap = (schema) => isObject(schema) && isObject(schema.additionalProperties) && !schema.properties;
+const isRich = (schema) =>
+  ["properties", "items", "oneOf", "anyOf", "allOf", "enum", "const", "additionalProperties"].some((key) => key in schema);
 const variantsOf = (schema) => (schema.anyOf ?? schema.oneOf ?? []).filter((v) => isObject(v) && v.type !== "null");
 
 // The item schema of a list, also when the list is written as variants that are all lists.
@@ -41,8 +44,10 @@ function itemsOf(schema) {
   if (!isObject(schema)) return undefined;
   if (isArray(schema)) return schema.items ?? {};
   const variants = variantsOf(schema);
-  if (variants.length && variants.every(isArray)) return { anyOf: variants.map((v) => v.items ?? {}) };
-  return undefined;
+  if (!variants.length || !variants.every(isArray)) return undefined;
+  const withItems = variants.filter((v) => isObject(v.items) && !isEmpty(v.items));
+  const lists = withItems.length ? withItems : variants;
+  return lists.length === 1 ? lists[0].items ?? {} : { anyOf: lists.map((v) => v.items ?? {}) };
 }
 
 // Splits "a|enum(x|y)|b" into ["a", "enum(x|y)", "b"]: only "|" outside parentheses or <> separates types.
@@ -98,78 +103,106 @@ function branchLabel(branch, index) {
   return { label: branch?.title ?? `variant ${index + 1}`, discriminated: false };
 }
 
-// The condition of an if/then/else, e.g. "taxMethod=flat_rate_method".
+// What a value condition says, e.g. "=BANK", " in (a, b)", " not matching ^(CH|LI)".
+function valueLabel(prop) {
+  if (!isObject(prop)) return " given";
+  if ("const" in prop) return `=${prop.const}`;
+  if (prop.enum) return ` in (${prop.enum.join(", ")})`;
+  if (prop.pattern) return ` matching ${prop.pattern}`;
+  if (isObject(prop.not)) {
+    if ("const" in prop.not) return ` not ${prop.not.const}`;
+    return ` not${valueLabel(prop.not)}`;
+  }
+  return " given";
+}
+
+// The condition of an if/then/else, e.g. "taxMethod=flat_rate_method" or "signaturePage=true or signees given".
 function conditionLabel(condition) {
-  const parts = Object.entries(condition?.properties ?? {}).map(([name, prop]) => {
-    if (isObject(prop) && "const" in prop) return `${name}=${prop.const}`;
-    if (isObject(prop) && prop.enum) return `${name} in (${prop.enum.join(", ")})`;
-    return name;
-  });
+  if (!isObject(condition)) return "condition met";
+  const alternatives = condition.anyOf ?? condition.oneOf;
+  if (alternatives) return alternatives.map(conditionLabel).join(" or ");
+  if (condition.allOf) return condition.allOf.map(conditionLabel).join(" and ");
+  const parts = Object.entries(condition.properties ?? {}).map(([name, prop]) => `${name}${valueLabel(prop)}`);
+  for (const name of condition.required ?? []) {
+    if (!condition.properties?.[name]) parts.push(`${name} given`);
+  }
   return parts.join(" and ") || "condition met";
 }
 
-// Merges the fields of allOf (all apply), oneOf/anyOf (one applies) and if/then/else into one flat map.
+// Merges the fields of allOf, oneOf/anyOf and if/then/else into one flat map.
 // required: fields the schema, an allOf branch or every alternative requires.
-// conditions: fields only some alternatives require. With discriminators ("type=company") a field is
-// required "when" its branch applies; otherwise it is required "unless" one of the other branches is used.
+// conditions: fields only some alternatives require, as clauses. A clause holds the discriminators that
+// must all apply ("when", e.g. paymentDirection=IN and paymentType=BANK) and the alternatives that
+// replace the field ("unless", e.g. isTemplate=true).
 function propertiesOf(schema) {
   const variants = new Map();
   const required = new Set();
   const conditions = new Map();
   if (!isObject(schema)) return { properties: {}, required, conditions };
-  const addProperties = (properties) => {
+
+  // Alternatives keep differing definitions as variants. Constraints (allOf, then/else) only refine a
+  // field, so a bare re-declaration such as {type: "array"} does not replace or split a richer one.
+  const addProperties = (properties, refine) => {
     for (const [name, prop] of Object.entries(properties ?? {})) {
       if (!isObject(prop)) continue; // true/false only allow or forbid a field in one branch
       const list = variants.get(name) ?? [];
-      if (!list.some((known) => JSON.stringify(known) === JSON.stringify(prop))) list.push(prop);
       variants.set(name, list);
+      if (list.some((known) => JSON.stringify(known) === JSON.stringify(prop))) continue;
+      if (list.length && (isEmpty(prop) || (refine && !isRich(prop)))) continue;
+      const placeholder = list.findIndex((known) => isEmpty(known) || (refine && !isRich(known)));
+      if (placeholder >= 0) list[placeholder] = prop;
+      else list.push(prop);
     }
   };
-  const addCondition = (name, kind, label) => {
-    if (!conditions.has(name)) conditions.set(name, { when: new Set(), unless: new Set() });
-    conditions.get(name)[kind].add(label);
+  const addClause = (name, clause) => {
+    const clauses = conditions.get(name) ?? [];
+    if (!clauses.some((known) => JSON.stringify(known) === JSON.stringify(clause))) clauses.push(clause);
+    conditions.set(name, clauses);
   };
-  const merge = (sub, outerLabel) => {
-    addProperties(sub.properties);
-    sub.conditions.forEach((condition, name) => {
-      condition.when.forEach((label) => addCondition(name, "when", label));
-      condition.unless.forEach((label) => addCondition(name, "unless", label));
-      if (outerLabel) addCondition(name, "when", outerLabel);
-    });
+  const merge = (sub, outer, refine) => {
+    addProperties(sub.properties, refine);
+    sub.conditions.forEach((clauses, name) =>
+      clauses.forEach((clause) => addClause(name, { when: outer ? [outer, ...clause.when] : clause.when, unless: clause.unless })),
+    );
   };
 
-  addProperties(schema.properties);
+  addProperties(schema.properties, false);
   (schema.required ?? []).forEach((name) => required.add(name));
   for (const branch of schema.allOf ?? []) {
     const sub = propertiesOf(branch);
-    merge(sub);
+    merge(sub, undefined, true);
     sub.required.forEach((name) => required.add(name));
   }
-  const alternatives = [];
+  const groups = [];
   for (const branches of [schema.oneOf, schema.anyOf]) {
-    if (branches?.length) alternatives.push(branches.map((branch, i) => [branch, branchLabel(branch, i)]));
+    if (branches?.length) groups.push({ branches: branches.map((b, i) => [b, branchLabel(b, i)]), refine: false });
   }
   if (isObject(schema.if) && (schema.then || schema.else)) {
     const label = conditionLabel(schema.if);
-    alternatives.push([
-      [schema.then ?? {}, { label, discriminated: true }],
-      [schema.else ?? {}, { label: `not ${label}`, discriminated: true }],
-    ]);
+    groups.push({
+      branches: [
+        [schema.then ?? {}, { label, discriminated: true }],
+        [schema.else ?? {}, { label: `not (${label})`, discriminated: true }],
+      ],
+      refine: true,
+    });
   }
-  for (const branches of alternatives) {
-    const subs = branches.map(([branch, { label, discriminated }]) => ({ ...propertiesOf(branch), label, discriminated }));
+  for (const { branches, refine } of groups) {
+    const subs = branches.map(([branch, info]) => ({ ...propertiesOf(branch), ...info }));
     const byDiscriminator = subs.every((sub) => sub.discriminated);
-    subs.forEach((sub) => merge(sub, byDiscriminator ? sub.label : undefined));
+    subs.forEach((sub) => merge(sub, byDiscriminator ? sub.label : undefined, refine));
     for (const sub of subs) {
       for (const name of sub.required) {
         if (subs.every((other) => other.required.has(name))) required.add(name);
-        else if (byDiscriminator) addCondition(name, "when", sub.label);
-        else subs.filter((other) => !other.required.has(name)).forEach((other) => addCondition(name, "unless", other.label));
+        else if (byDiscriminator) addClause(name, { when: [sub.label], unless: [] });
+        else addClause(name, { when: [], unless: subs.filter((o) => !o.required.has(name)).map((o) => o.label) });
       }
     }
   }
-  // A required field without a description of its own still has to show up.
-  for (const name of [...required, ...conditions.keys()]) if (!variants.has(name)) variants.set(name, [{}]);
+  // A required field without a definition of its own still has to show up.
+  for (const name of [...required, ...conditions.keys()]) {
+    if (!variants.get(name)?.length) variants.set(name, [{}]);
+  }
   for (const name of required) conditions.delete(name);
 
   const properties = {};
@@ -177,9 +210,13 @@ function propertiesOf(schema) {
   return { properties, required, conditions };
 }
 
+function descriptions(prop) {
+  if (!isObject(prop)) return [];
+  return [prop.description, ...(prop.anyOf ?? []).flatMap(descriptions)].filter(Boolean);
+}
+
 function descriptionOf(prop) {
-  const texts = [prop.description, ...(prop.anyOf ?? []).map((variant) => variant?.description)].filter(Boolean);
-  return short([...new Set(texts.map((text) => short(text)))].join(" | "), 240);
+  return short([...new Set(descriptions(prop).map((text) => short(text)))].join(" | "), 240);
 }
 
 function fieldsOf(schema, prefix = "", depth = 1) {
@@ -191,9 +228,15 @@ function fieldsOf(schema, prefix = "", depth = 1) {
     if (required.has(name)) {
       field.required = true;
     } else if (conditions.has(name)) {
-      const { when, unless } = conditions.get(name);
-      if (when.size) field.requiredIf = [...when].join(" or ");
-      if (unless.size) field.requiredUnless = [...unless].join(" or ");
+      // A rule without a "when" (e.g. "unless isTemplate=true") already requires the field in general,
+      // so narrower rules next to it would only make it look optional.
+      const clauses = conditions.get(name);
+      const general = clauses.filter((c) => !c.when.length);
+      const used = general.length ? general : clauses;
+      const ifs = [...new Set(used.filter((c) => c.when.length).map((c) => c.when.join(" and ")))];
+      const unless = [...new Set(used.flatMap((c) => c.unless))];
+      if (ifs.length) field.requiredIf = ifs.join(" or ");
+      if (unless.length) field.requiredUnless = unless.join(" or ");
     }
     const description = descriptionOf(prop);
     if (description) field.description = description;

@@ -29,8 +29,18 @@ test("creating an invoice shows the position kinds and the receiver rules", () =
   assert.equal(field(entry, "documents[].isTemplate").required, undefined);
 });
 
-test("payments expose the e-mail flag that write mode blocks", () => {
+test("payments expose the e-mail flag that write mode blocks and combine nested conditions with and", () => {
   const entry = endpoint("POST", "/accounts/{accountUuid}/finances/v2/payments");
   assert.ok(field(entry, "processing.sendPaymentConfirmation"));
   assert.match(field(entry, "paymentDirection").type, /"IN"/);
+  assert.equal(field(entry, "bankAccountIban").requiredIf, "paymentDirection=IN and paymentType=BANK");
+  assert.equal(field(entry, "debitBankAccountIban").requiredIf, "paymentDirection=OUT and paymentType=BANK");
+  assert.match(field(entry, "processing.exchangeCurrencyAmount").requiredIf, /^type=receipt and exchangeRate/);
+});
+
+test("quotes keep signee types required and the receiver rule of non-templates", () => {
+  const entry = endpoint("POST", "/accounts/{accountUuid}/documents/v2/quotes");
+  assert.equal(field(entry, "documents[].signees[].type").required, true);
+  assert.equal(field(entry, "documents[].receiver").requiredUnless, "isTemplate=true");
+  assert.equal(field(entry, "documents[].receiver").requiredIf, undefined);
 });

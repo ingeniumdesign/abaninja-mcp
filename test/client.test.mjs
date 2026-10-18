@@ -70,6 +70,24 @@ test("write mode blocks payment confirmation e-mails", () => {
   assert.match(checkAllowed("write", "PATCH", `${payments}/u`, send), /full mode/);
   assert.equal(checkAllowed("write", "POST", payments, { processing: { sendPaymentConfirmation: false } }), null);
   assert.equal(checkAllowed("full", "POST", payments, send), null);
+  for (const flag of [1, "1", "true", "on", "yes"]) {
+    assert.match(checkAllowed("write", "POST", payments, { processing: { sendPaymentConfirmation: flag } }), /full mode/, String(flag));
+  }
+  for (const flag of [false, 0, "0", "false"]) {
+    assert.equal(checkAllowed("write", "POST", payments, { processing: { sendPaymentConfirmation: flag } }), null, String(flag));
+  }
+  assert.match(checkAllowed("write", "POST", payments, {}, { "processing[sendPaymentConfirmation]": "1" }), /full mode/);
+  assert.match(checkAllowed("write", "PATCH", `${payments}/u`, {}, { "processing[type]": "receipt" }), /full mode/);
+});
+
+test("control characters in query names are rejected, so a NUL cannot hide _method", () => {
+  const company = "/accounts/x/addresses/v2/companies/u";
+  for (const key of ["_method\u0000", "_method\u0000junk", " .method\u0000x", "x\u0001"]) {
+    assert.notEqual(checkAllowed("write", "POST", company, {}, { [key]: "DELETE" }), null, JSON.stringify(key));
+  }
+  for (const key of ["_method[]", "_method[x]", "__method"]) {
+    assert.match(checkAllowed("write", "POST", company, {}, { [key]: "DELETE" }), /_method/, key);
+  }
 });
 
 test("a _method override cannot turn an allowed call into a blocked one", () => {

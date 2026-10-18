@@ -27,6 +27,13 @@ const companies = [
       { type: "phone", value: "+41 44 123 45 67", is_primary: false },
     ],
   },
+  {
+    uuid: "c2",
+    customer_number: "01234567",
+    company_name: "Nullstelle GmbH",
+    addresses: [{ uuid: "a2", address: "Bahnhofplatz", street_number: "1", zip_code: "3011", city: "Bern", country_code: "CH" }],
+    contacts: [{ type: "phone", value: "+41 (0)31 765 43 21", is_primary: true }],
+  },
 ];
 
 let invoices = sampleInvoices;
@@ -107,6 +114,10 @@ test("address search finds street, customer number, punctuated names and phone n
   assert.equal(await total("044 123 45 67"), 1);
   assert.equal(await total("+41441234567"), 1);
   assert.equal(await total("0041 44 123 45 67"), 1);
+  assert.equal(await total("01234567"), 1);
+  assert.equal(await total("031 765 43 21"), 1);
+  assert.equal(await total("+41 (0)31 765 43 21"), 1);
+  assert.equal(await total("+41 (0)44 123 45 67"), 1);
   assert.equal(await total("nobody"), 0);
   assert.equal(await total("044 999 99 99"), 0);
 });
@@ -127,7 +138,7 @@ test("a long raw API list drops whole entries and stays valid JSON", async () =>
   });
   assert.ok(result.json, "response is valid JSON");
   assert.ok(result.text.length <= 50_000);
-  assert.equal(result.json.shortened.total, 120);
+  assert.equal(result.json.shortened.entriesOnPage, 120);
   assert.equal(result.json.shortened.shown, result.json.data.documents.length);
   assert.ok(result.json.shortened.shown < 120);
   invoices = sampleInvoices;

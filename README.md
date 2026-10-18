@@ -24,6 +24,8 @@ Standardmässig kann der Server nur lesen. Alles Weitere schaltet man über `ABA
 | `write` | zusätzlich Anlegen und Ändern | Löschen, Versenden (auch Zahlungsbestätigungen), Mahnen, Stornieren, Massenaktionen, ausgehende Webhooks |
 | `full` | die ganze API | nichts |
 
+Der Modus `write` schützt vor versehentlichen Aktionen, ist aber keine vollständige Sicherheitsgrenze gegen gezielt manipulierte Anfragen (zum Beispiel Anweisungen, die in Dokumenten oder Daten versteckt sind). Sicher ist nur `read`. Für `write` und `full` am besten ein eigenes Token mit möglichst wenigen Bereichen verwenden und jede Änderung bestätigen.
+
 ## Voraussetzungen
 
 - Node.js ab Version 22
