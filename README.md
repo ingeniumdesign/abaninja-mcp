@@ -4,14 +4,34 @@ MCP-Server für [AbaNinja](https://www.abaninja.ch). Claude und andere KI-Assist
 
 ## Installation
 
-1. In AbaNinja ein API-Token erstellen ([Anleitung](https://docs.abaninja.ch/guide/authentication.html)).
-2. Je nach Programm:
-   - **Claude Desktop:** [abaninja-mcp.mcpb](https://github.com/ingeniumdesign/abaninja-mcp/releases/latest/download/abaninja-mcp.mcpb) herunterladen, öffnen und das Token eintragen.
-   - **Claude Code** (braucht [Node.js](https://nodejs.org) ab 22):
-     ```bash
-     claude mcp add abaninja --scope user -e ABANINJA_API_TOKEN=dein-token -- npx -y abaninja-mcp
-     ```
-   - **Andere MCP-Clients:** Befehl `npx -y abaninja-mcp`, Token in `ABANINJA_API_TOKEN`.
+Zuerst in AbaNinja ein API-Token erstellen ([Anleitung](https://docs.abaninja.ch/guide/authentication.html)).
+
+### Claude Desktop
+
+1. [abaninja-mcp.mcpb](https://github.com/ingeniumdesign/abaninja-mcp/releases/latest/download/abaninja-mcp.mcpb) herunterladen.
+2. In Claude **Einstellungen → Erweiterungen → Erweiterte Einstellungen → Erweiterung installieren…** wählen und die Datei öffnen.
+3. Installieren und das Token eintragen. Ein Neustart ist nicht nötig, nur falls die Tools fehlen.
+
+### Claude Code
+
+Braucht [Node.js](https://nodejs.org) ab 22. Im Terminal:
+
+```bash
+claude mcp add abaninja --scope user -e ABANINJA_API_TOKEN=dein-token -- npx -y abaninja-mcp
+```
+
+Danach `claude` neu starten. `/mcp` zeigt, ob AbaNinja verbunden ist.
+
+### Andere MCP-Clients
+
+Befehl `npx -y abaninja-mcp`, Token in `ABANINJA_API_TOKEN`.
+
+## Benutzen
+
+Einfach im Chat fragen, Claude nutzt AbaNinja dann selbst:
+
+- «Welche Rechnungen sind noch offen?»
+- «Zeig mir die letzten Offerten für die Müller AG.»
 
 ## Modi
 
