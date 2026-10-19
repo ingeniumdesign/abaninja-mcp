@@ -30,7 +30,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   const accountUuid = env.ABANINJA_ACCOUNT_UUID?.trim() || undefined;
   if (accountUuid && !UUID.test(accountUuid)) {
-    throw new Error("ABANINJA_ACCOUNT_UUID must be a uuid like 415740cb-0000-4000-8000-000000000000.");
+    throw new Error("ABANINJA_ACCOUNT_UUID must be a uuid like 00000000-0000-4000-8000-000000000000.");
   }
   return { token, accountUuid, mode };
 }

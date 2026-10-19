@@ -19,8 +19,8 @@ const sampleInvoices = [
   { uuid: "i6", invoiceNumber: "RE-2026-006", status: "due", currencyCode: "CHF", openAmount: 30, receiver: { personUuid: "p1", name: "René Egger" } },
 ];
 const quotes = [
-  { uuid: "q1", quoteNumber: "O0182", title: "Website Relaunch, replaces O0183", status: "sent", currencyCode: "CHF", documentTotal: 5000, receiver: { companyUuid: "c1", name: "Müller AG" } },
-  { uuid: "q2", quoteNumber: "O0183", title: "Hosting", status: "draft", currencyCode: "CHF", documentTotal: 240, receiver: { companyUuid: "c2", name: "Nullstelle GmbH" } },
+  { uuid: "q1", quoteNumber: "O0041", title: "Website Relaunch, replaces O0042", status: "sent", currencyCode: "CHF", documentTotal: 5000, receiver: { companyUuid: "c1", name: "Müller AG" } },
+  { uuid: "q2", quoteNumber: "O0042", title: "Hosting", status: "draft", currencyCode: "CHF", documentTotal: 240, receiver: { companyUuid: "c2", name: "Nullstelle GmbH" } },
 ];
 const companies = [
   {
@@ -193,7 +193,7 @@ test("the address list is loaded again after a change made through the server", 
 test("find_documents: by number (exact first), text, customer and status, with dates and customers for every type", async () => {
   const call = await connect();
   const find = async (args) => (await call("abaninja_find_documents", args)).json.items;
-  assert.deepEqual((await find({ type: "quotes", query: "O0183" })).map((d) => [d.uuid, d.number]), [["q2", "O0183"], ["q1", "O0182"]]);
+  assert.deepEqual((await find({ type: "quotes", query: "O0042" })).map((d) => [d.uuid, d.number]), [["q2", "O0042"], ["q1", "O0041"]]);
   assert.deepEqual((await find({ type: "quotes", query: "website" })).map((d) => d.uuid), ["q1"]);
   assert.deepEqual((await find({ type: "quotes", customer_uuid: "c2" })).map((d) => d.uuid), ["q2"]);
   assert.deepEqual((await find({ type: "invoices", query: "RE-2026-004" })).map((d) => d.uuid), ["i4"]);

@@ -43,7 +43,7 @@ Was beim Bau dieses Servers an der AbaNinja-API aufgefallen ist. Stand Oktober 2
 ## Dokumente
 
 - Listen liefern `{ status, message, data: { documents: [...] } }`. Auch der Abruf eines einzelnen Dokuments liefert diese Hülle, mit dem Dokument in `data.documents[0]`.
-- Ein neues Dokument ist zuerst ein Entwurf (`status: draft`), bekommt aber sofort seine Nummer (z. B. `O0183`). Wird es gelöscht, bleibt diese Nummer als Lücke im Nummernkreis.
+- Ein neues Dokument ist zuerst ein Entwurf (`status: draft`), bekommt aber sofort seine Nummer (z. B. `O0042`). Wird es gelöscht, bleibt diese Nummer als Lücke im Nummernkreis.
 - Welche Aktionen ein Dokument gerade erlaubt, zeigt `GET …/{type}/{uuid}/actions`. Bei einem Entwurf fehlt zum Beispiel `email`.
 - `PATCH …/actions/delete` entfernt ein Dokument, danach antwortet die API mit HTTP 404.
 - `PATCH` auf ein Dokument ersetzt es vollständig: Datum (`quoteDate`, `invoiceDate`), `currencyCode`, `pricesIncludeVat`, `receiver` und `positions` müssen mit, bei Rechnungen auch `paymentInstructions`. Darin ist nur eine Variante erlaubt (zum Beispiel nur `bankAccountUuid`), obwohl die API beim Lesen `bankAccountUuid`, `iban` und `bic` zusammen liefert.

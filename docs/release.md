@@ -1,10 +1,8 @@
 # Release
 
-## Einmalig vor dem ersten Release
+## Einmalig
 
-1. In `package.json` die Zeile `"private": true` entfernen.
-2. Repository auf GitHub öffentlich schalten.
-3. Bei npm anmelden: `npm login`.
+Bei npm anmelden (`npm login`) und [mcp-publisher](https://github.com/modelcontextprotocol/registry/releases/latest) installieren.
 
 ## Jedes Release
 
@@ -20,7 +18,7 @@
    ```bash
    npm publish
    ```
-4. Im offiziellen MCP-Verzeichnis eintragen ([mcp-publisher](https://github.com/modelcontextprotocol/registry/releases/latest)):
+4. Im offiziellen MCP-Verzeichnis eintragen:
    ```bash
    mcp-publisher login github
    mcp-publisher publish

@@ -16,7 +16,7 @@
       "transport": { "type": "stdio" },
       "environmentVariables": [
         { "name": "ABANINJA_API_TOKEN", "description": "API token from AbaNinja", "isRequired": true, "isSecret": true },
-        { "name": "ABANINJA_MODE", "description": "read (default), write or full" },
+        { "name": "ABANINJA_MODE", "description": "read (default), write or full", "default": "read", "choices": ["read", "write", "full"] },
         { "name": "ABANINJA_ACCOUNT_UUID", "description": "Account, if the token can access several" }
       ]
     }

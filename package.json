@@ -1,7 +1,6 @@
 {
   "name": "abaninja-mcp",
   "version": "0.1.0",
-  "private": true,
   "description": "Unofficial MCP server for AbaNinja: gives AI assistants access to an AbaNinja account through the official REST API.",
   "license": "MIT",
   "author": "INGENIUMDESIGN",
