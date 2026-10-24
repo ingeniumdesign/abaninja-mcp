@@ -2,6 +2,8 @@
 
 MCP-Server für [AbaNinja](https://www.abaninja.ch). Claude und andere KI-Assistenten greifen damit über die offizielle API auf ein AbaNinja-Konto zu. Inoffizielles Projekt.
 
+![Demo: offene Rechnungen und Offerten im Chat abfragen (Illustration mit Beispieldaten)](docs/demo.gif)
+
 ## Installation
 
 Zuerst in AbaNinja ein API-Token erstellen ([Anleitung](https://docs.abaninja.ch/guide/authentication.html)).
