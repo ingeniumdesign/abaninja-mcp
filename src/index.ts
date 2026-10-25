@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Entry point: reads the configuration, registers the tools and serves MCP over stdio.
 
 import { readFileSync } from "node:fs";

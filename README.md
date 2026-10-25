@@ -16,17 +16,20 @@ Zuerst in AbaNinja ein API-Token erstellen ([Anleitung](https://docs.abaninja.ch
 
 ### Claude Code
 
-Braucht [Node.js](https://nodejs.org) ab 22. Im Terminal:
+Braucht [Git](https://git-scm.com) und [Node.js](https://nodejs.org) ab 22. Im Terminal (in cmd `%CD%` statt `$PWD`):
 
 ```bash
-claude mcp add abaninja --scope user -e ABANINJA_API_TOKEN=dein-token -- npx -y abaninja-mcp
+git clone https://github.com/ingeniumdesign/abaninja-mcp.git
+cd abaninja-mcp
+npm ci
+claude mcp add --scope user abaninja node "$PWD/dist/index.js" -e ABANINJA_API_TOKEN=dein-token
 ```
 
-Danach `claude` neu starten. `/mcp` zeigt, ob AbaNinja verbunden ist.
+Danach `claude` neu starten. `/mcp` zeigt, ob AbaNinja verbunden ist. Aktualisieren: im Ordner `git pull` und `npm ci`.
 
 ### Andere MCP-Clients
 
-Befehl `npx -y abaninja-mcp`, Token in `ABANINJA_API_TOKEN`.
+`git clone` und `npm ci` wie oben, dann Befehl `node` mit Argument `<Ordner>/dist/index.js` (absoluter Pfad) eintragen, Token in `ABANINJA_API_TOKEN`.
 
 ## Benutzen
 

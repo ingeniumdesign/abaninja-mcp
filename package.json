@@ -1,28 +1,11 @@
 {
   "name": "abaninja-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "private": true,
   "description": "Unofficial MCP server for AbaNinja: gives AI assistants access to an AbaNinja account through the official REST API.",
   "license": "MIT",
   "author": "INGENIUMDESIGN",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/ingeniumdesign/abaninja-mcp.git"
-  },
-  "keywords": [
-    "mcp",
-    "model-context-protocol",
-    "abaninja",
-    "invoicing",
-    "switzerland"
-  ],
   "type": "module",
-  "bin": {
-    "abaninja-mcp": "dist/index.js"
-  },
-  "files": [
-    "dist",
-    "catalog"
-  ],
   "engines": {
     "node": ">=22"
   },
@@ -42,6 +25,5 @@
     "@anthropic-ai/mcpb": "^2.1.2",
     "@types/node": "^22.20.5",
     "typescript": "^7.0.2"
-  },
-  "mcpName": "io.github.ingeniumdesign/abaninja-mcp"
+  }
 }
