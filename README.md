@@ -6,7 +6,7 @@ MCP-Server für [AbaNinja](https://www.abaninja.ch). Claude und andere KI-Assist
 
 ## Installation
 
-Zuerst in AbaNinja ein API-Token erstellen ([Anleitung](https://docs.abaninja.ch/guide/authentication.html)).
+Zuerst in AbaNinja ein API-Token erstellen ([Anleitung](https://docs.abaninja.ch/guide/authentication.html)). Dem Token nur die nötigen Bereiche geben, denn AbaNinja kennt keine reinen Lese-Tokens. Nicht mehr gebrauchte Tokens in AbaNinja löschen.
 
 ### Claude Desktop
 
