@@ -6,7 +6,6 @@ dist/
 # Secrets and local client configuration (may contain API tokens)
 .env
 .env.*
-!.env.example
 .mcp.json
 
 # Records of an interrupted live test

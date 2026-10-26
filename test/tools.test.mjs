@@ -53,7 +53,7 @@ const companies = [
 ];
 const persons = [{ uuid: "p1", customer_number: "P0001", first_name: "René", last_name: "Egger", addresses: [] }];
 const creditNotes = [{ uuid: "g1", creditNoteNumber: "G0001", creditNoteDate: "2026-09-30", status: "sent", currencyCode: "CHF", documentTotal: 50, receiver: { companyUuid: "c1", name: "Müller AG" } }];
-const receipts = [{ uuid: "b1", receiptNumber: "B-77", invoiceDate: "2026-09-01", currencyCode: "CHF", documentTotal: 89, receiver: { companyUuid: "s1", receiverInformation: { name: "Swisscom AG", customerNumber: "L0001" } } }];
+const receipts = [{ uuid: "b1", receiptNumber: "B-77", invoiceDate: "2026-09-01", currencyCode: "CHF", documentTotal: 89, receiver: { companyUuid: "s1", receiverInformation: { companyName: "Swisscom AG", name: "Hans Muster", customerNumber: "L0001" } } }];
 
 // Tests may replace the invoices; each test starts with the samples.
 let invoices;
@@ -144,6 +144,14 @@ test("a long raw API list drops whole entries and stays valid JSON", async () =>
   assert.equal(result.json.shortened.entriesOnPage, 120);
   assert.equal(result.json.shortened.shown, result.json.data.documents.length);
   assert.ok(result.json.shortened.shown < 120);
+});
+
+test("secrets in raw answers are hidden", async () => {
+  invoices = [{ uuid: "w1", signatureKey: "s3cr3t-key", settings: { secret: "s3cr3t-nested" } }];
+  const call = await connect();
+  const result = await call("abaninja_request", { method: "GET", path: "/accounts/{accountUuid}/documents/v2/invoices", query: { page: 1 } });
+  assert.doesNotMatch(result.text, /s3cr3t/);
+  assert.equal(result.json.data.documents[0].signatureKey, "[hidden]");
 });
 
 test("an empty raw list stays a list", async () => {

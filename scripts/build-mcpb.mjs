@@ -17,7 +17,7 @@ try {
   const manifest = JSON.parse(readFileSync(join(stage, "manifest.json"), "utf8"));
   writeFileSync(join(stage, "manifest.json"), JSON.stringify({ ...manifest, version }, null, 2));
   execSync("npm ci --omit=dev --ignore-scripts --no-audit --no-fund", { cwd: stage, stdio: "inherit" });
-  execSync(`mcpb pack "${stage}" "${join(root, "abaninja-mcp.mcpb")}"`, { cwd: root, stdio: "inherit" });
+  execSync(`npx --yes @anthropic-ai/mcpb@2.1.2 pack "${stage}" "${join(root, "abaninja-mcp.mcpb")}"`, { cwd: root, stdio: "inherit" });
 } finally {
   rmSync(stage, { recursive: true, force: true });
 }

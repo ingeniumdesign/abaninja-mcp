@@ -45,7 +45,7 @@ Standard ist nur lesen. Mehr erlaubt `ABANINJA_MODE`, in Claude Desktop die Häk
 | Modus | Erlaubt |
 | --- | --- |
 | `read` (Standard) | nur lesen |
-| `write` | auch anlegen und ändern. Gesperrt bleiben: löschen, stornieren, versenden, mahnen, Bankverbindungen, Webhooks, Import per URL |
+| `write` | auch anlegen und ändern. Gesperrt bleiben: löschen, stornieren, versenden, mahnen, Sammelaktionen, Bankverbindungen, Webhooks, Import per URL |
 | `full` | alles |
 
 `write` schützt vor Versehen, nicht vor manipulierten Anweisungen in Daten oder Dokumenten. Sicher ist nur `read`.

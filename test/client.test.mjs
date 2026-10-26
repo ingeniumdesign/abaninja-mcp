@@ -101,6 +101,7 @@ test("query names of changing calls must be plain, so data cannot be smuggled pa
   assert.notEqual(checkAllowed("write", "POST", payments, {}, { "processing[sendPaymentConfirmation]": "1" }), null);
   assert.notEqual(checkAllowed("write", "POST", payments, {}, { processing: "x" }), null);
   assert.notEqual(checkAllowed("write", "POST", "/accounts/x/documents/v2/invoices/import", {}, { "documents[0][documentUrl]": "https://x" }), null);
+  assert.notEqual(checkAllowed("write", "POST", "/accounts/x/addresses/v2/addresses", { type: "company", name: "x" }, { automatic_dunning: 1 }), null);
   assert.equal(checkAllowed("write", "POST", "/accounts/x/addresses/v2/addresses", { type: "company", name: "x" }, { force: false }), null);
 });
 
@@ -181,11 +182,14 @@ test("errors keep JSON details, reduce HTML pages to text and explain network fa
   await assert.rejects(client("read").request("GET", "/accounts/{accountUuid}/addresses/v2/companies"), /Could not reach api\.abaninja\.ch \(ENOTFOUND\)/);
 });
 
-test("rate limits are retried, empty answers are reported as success", async () => {
+test("rate limits are retried, server errors on writes are not, empty answers are reported as success", async () => {
   let attempts = 0;
   respond = () => (++attempts === 1 ? json({ message: "slow down" }, 429, { "retry-after": "0" }) : json({ data: [] }));
   assert.deepEqual(await client("read").request("GET", "/accounts/{accountUuid}/addresses/v2/companies"), { data: [] });
   assert.equal(attempts, 2);
+  respond = () => json({ message: "unavailable" }, 503);
+  await assert.rejects(client("write").request("POST", "/accounts/{accountUuid}/addresses/v2/addresses", { body: {} }), /503/);
+  assert.equal(calls.filter((c) => c.method === "POST").length, 1, "a write is not repeated after a server error");
   respond = () => new Response(null, { status: 204 });
   assert.deepEqual(await client("full").request("DELETE", "/accounts/{accountUuid}/addresses/v2/companies/u"), { ok: true, status: 204 });
 });

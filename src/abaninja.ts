@@ -62,12 +62,6 @@ const BLOCKED_FIELDS: Record<string, string> = {
 
 const PAYMENTS = /\/finances\/v2\/payments(\/[^/]+)?$/i;
 
-// The name PHP gives a parameter: it stops at a NUL byte, drops leading spaces, turns " " and "." into "_"
-// and starts array syntax at "[". So "_method\0x", " .method" and "_method[]" all arrive as "_method".
-function phpKey(key: string): string {
-  return key.split("\0")[0].replace(/^\s+/, "").replace(/[ .]/g, "_").split("[")[0];
-}
-
 // A value counts as set unless it is missing or clearly false.
 const isSet = (value: unknown) => value != null && ![false, 0, "0", "false", ""].includes(value as never);
 
@@ -87,12 +81,9 @@ export function checkAllowed(mode: Mode, method: string, path: string, body?: un
   if (mode === "full") return null;
   const verb = method.toUpperCase();
   const keys = Object.keys(query);
-  if (keys.some((key) => /[\x00-\x1f\x7f]/.test(key))) {
-    return "Query parameter names must not contain control characters.";
-  }
   // The backend honours a method override ("_method=DELETE" on a POST), which would turn an allowed
-  // POST into a blocked DELETE.
-  if ([...keys, ...Object.keys(body ?? {})].some((key) => /^_*method$/i.test(phpKey(key)))) {
+  // POST into a blocked DELETE. Other spellings PHP would rename fail the plain-name rule below.
+  if ([...keys, ...Object.keys(body ?? {})].some((key) => /^_*method$/i.test(key))) {
     return "A _method parameter would change the HTTP method. It is only allowed in full mode.";
   }
   if (verb === "GET") return null;

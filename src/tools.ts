@@ -225,9 +225,9 @@ function documentNumber(doc: Row): string | undefined {
   return key ? String(doc[key]) : undefined;
 }
 
-// The customer or supplier name; receipts keep it in receiver.receiverInformation.
+// The customer or supplier name; receipts keep it in receiver.receiverInformation, where name is the contact person.
 const receiverName = (doc: Row) =>
-  doc.receiver?.name ?? doc.receiver?.receiverInformation?.name ?? doc.receiver?.receiverInformation?.companyName;
+  doc.receiver?.name ?? doc.receiver?.receiverInformation?.companyName ?? doc.receiver?.receiverInformation?.name;
 const receiverNumber = (doc: Row) => doc.receiver?.customerNumber ?? doc.receiver?.receiverInformation?.customerNumber;
 
 function documentView(doc: Row) {
@@ -238,7 +238,7 @@ function documentView(doc: Row) {
     status: doc.status,
     date:
       doc.invoiceDate ?? doc.quoteDate ?? doc.creditNoteDate ?? doc.deliveryNoteDate ?? doc.contractNoteDate ??
-      doc.supplierCreditNoteDate ?? doc.receiptDate ?? doc.documentDate,
+      doc.supplierCreditNoteDate,
     dueDate: doc.dueDate,
     customer: receiverName(doc),
     customerNumber: receiverNumber(doc),
@@ -275,7 +275,7 @@ const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
 const MODE_TEXT = {
   read: "This server runs in read mode: only GET is allowed.",
   write:
-    "This server runs in write mode: GET, POST, PATCH and PUT are allowed; deleting, sending, dunning, bulk actions, bank details (bank accounts, IBAN or QR-IBAN in documents), outgoing webhooks and imports from a URL are refused.",
+    "This server runs in write mode: GET, POST, PATCH and PUT are allowed; deleting, cancelling, sending, dunning, bulk actions, bank details (bank accounts, IBAN or QR-IBAN in documents), outgoing webhooks and imports from a URL are refused.",
   full: "This server runs in full mode: every call is allowed, including deleting and sending. Confirm such calls with the user first.",
 };
 
